@@ -511,3 +511,35 @@ fn the_keywords_are_sorted_for_the_search() {
             .all(|word| *word == word.to_ascii_uppercase())
     );
 }
+
+#[test]
+fn a_columns_kind_comes_from_its_type() {
+    use crate::types::DbColumnKind::{Binary, Number, Other, Text, Time};
+    let cases = [
+        (Engine::Mysql, "bigint unsigned", Number),
+        (Engine::Mysql, "decimal(8,2)", Number),
+        (Engine::Mysql, "varchar(255)", Text),
+        (Engine::Mysql, "timestamp", Time),
+        (Engine::Mysql, "longblob", Binary),
+        (Engine::Mysql, "json", Text),
+        (Engine::Mysql, "geometry", Other),
+        (Engine::Postgres, "character varying(255)", Text),
+        (Engine::Postgres, "timestamp(0) without time zone", Time),
+        (Engine::Postgres, "double precision", Number),
+        (Engine::Postgres, "bytea", Binary),
+        (Engine::Postgres, "tsvector", Other),
+        (Engine::Sqlite, "INTEGER", Number),
+        (Engine::Sqlite, "varchar", Text),
+        (Engine::Sqlite, "datetime", Time),
+        (Engine::Sqlite, "BLOB", Binary),
+        (Engine::Sqlite, "numeric", Number),
+        (Engine::Sqlite, "", Other),
+    ];
+    for (engine, type_name, kind) in cases {
+        assert_eq!(
+            column_kind(engine, type_name),
+            kind,
+            "{engine:?} {type_name}"
+        );
+    }
+}

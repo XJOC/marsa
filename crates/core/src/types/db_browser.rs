@@ -376,6 +376,10 @@ pub struct DbRowsRequest {
     pub offset: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<DbSort>,
+    /// Count the rows exactly (up to 2 seconds): when a table opens, and on
+    /// Refresh. Else the total is the server's estimate, marked as one.
+    #[serde(default)]
+    pub count: bool,
 }
 
 /// One column to sort a page by, before the primary key.
@@ -668,12 +672,14 @@ mod db_browser_tests {
                     column: "email".into(),
                     descending: true,
                 }),
+                count: true,
             },
             json!({
                 "source": { "kind": "server", "server": "mysql", "database": "shop" },
                 "table": { "name": "users" },
                 "offset": 1000,
                 "sort": { "column": "email", "descending": true },
+                "count": true,
             }),
         );
         round_trip(

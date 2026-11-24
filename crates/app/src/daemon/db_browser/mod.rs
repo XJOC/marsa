@@ -5,6 +5,8 @@
 //! | --- | --- |
 //! | `GET /v1/db/sources` | `DbSources`: Marsa's servers and the sites' SQLite files |
 //! | `POST /v1/db/tables` | `DbTables`: the tables and views of a source |
+//! | `POST /v1/db/table` | `DbTable`: the columns of a table |
+//! | `POST /v1/db/rows` | `DbPage`: 500 rows after `offset`, in the key's order |
 //! | `POST /v1/db/close` | `204`: every browser connection closes |
 //!
 //! | Error | When |
@@ -13,6 +15,8 @@
 //! | 400 `site_name_invalid` | the site's name cannot be a site's |
 //! | 404 `site_not_found` | no site has that name |
 //! | 404 `db_not_found` | the server has no such database, or it is one of the server's own |
+//! | 404 `db_table_not_found` | the catalog does not list the table |
+//! | 400 `db_source_invalid` | the sort column is not the table's, or a name cannot be quoted |
 //! | 404 `db_file_not_found` | the site has no SQLite file; none is made |
 //! | 403 `db_file_outside_site` | the file is not a regular file inside the site's folder |
 //! | 409 `db_server_not_running` | the server is not Marsa's running one |
@@ -25,6 +29,7 @@
 //! database said: those go to the client that asked, and only there.
 
 mod catalog;
+mod rows;
 mod servers;
 mod sqlite;
 mod store;
@@ -41,7 +46,8 @@ use axum::{Json, Router};
 use marsa_core::codes;
 use marsa_core::databases::ServerKind;
 use marsa_core::types::{
-    DbDatabase, DbServer, DbServerInfo, DbSource, DbSources, DbTables, DbTablesRequest,
+    DbDatabase, DbPage, DbRowsRequest, DbServer, DbServerInfo, DbSource, DbSources, DbTable,
+    DbTableRequest, DbTables, DbTablesRequest,
 };
 use tracing::info;
 
@@ -52,6 +58,10 @@ use crate::daemon::state::Daemon;
 /// The browser's own reads (the catalog, a page, a value) end within this
 /// time.
 const REQUEST_LIMIT: Duration = Duration::from_secs(10);
+
+/// How long an exact count of a table's rows may take; past it, the total
+/// is the server's estimate.
+const COUNT_LIMIT: Duration = Duration::from_secs(2);
 
 /// How long a server connection stays open with no request.
 const IDLE: Duration = Duration::from_secs(60);
@@ -106,6 +116,8 @@ pub fn routes() -> Router<Arc<Daemon>> {
     Router::new()
         .route("/v1/db/sources", get(sources))
         .route("/v1/db/tables", post(tables))
+        .route("/v1/db/table", post(table))
+        .route("/v1/db/rows", post(rows))
         .route("/v1/db/close", post(close))
 }
 
@@ -199,6 +211,58 @@ async fn tables(
     };
     log(&source, "tables", started, tables.tables.len());
     Ok(Json(tables))
+}
+
+async fn table(
+    State(daemon): State<Arc<Daemon>>,
+    body: Result<Json<DbTableRequest>, JsonRejection>,
+) -> Result<Json<DbTable>, HttpError> {
+    let Json(DbTableRequest { source, table }) =
+        body.map_err(|err| err.reject(codes::INVALID_BODY))?;
+    let started = Instant::now();
+    let answer = match &source {
+        DbSource::SiteFile { site } => {
+            let file = sqlite::site_file(&daemon, site).await?;
+            within(sqlite::table(file, table)).await?
+        }
+        DbSource::Server { server, .. } => return Err(rows_not_yet(&daemon, *server)),
+    };
+    log(&source, "table", started, answer.columns.len());
+    Ok(Json(answer))
+}
+
+async fn rows(
+    State(daemon): State<Arc<Daemon>>,
+    body: Result<Json<DbRowsRequest>, JsonRejection>,
+) -> Result<Json<DbPage>, HttpError> {
+    let Json(request) = body.map_err(|err| err.reject(codes::INVALID_BODY))?;
+    let source = request.source.clone();
+    let started = Instant::now();
+    let page = match &source {
+        DbSource::SiteFile { site } => {
+            let file = sqlite::site_file(&daemon, site).await?;
+            within(sqlite::page(file, request)).await?
+        }
+        DbSource::Server { server, .. } => return Err(rows_not_yet(&daemon, *server)),
+    };
+    log(&source, "rows", started, page.rows.len());
+    Ok(Json(page))
+}
+
+/// A server's columns and rows come with the next change.
+fn rows_not_yet(daemon: &Daemon, server: DbServer) -> HttpError {
+    if daemon.server(server.kind()).ready_port(daemon).is_none() {
+        return HttpError::new(
+            StatusCode::CONFLICT,
+            codes::DB_SERVER_NOT_RUNNING,
+            "the server is not running",
+        );
+    }
+    HttpError::new(
+        StatusCode::BAD_GATEWAY,
+        codes::DB_UNAVAILABLE,
+        "this daemon does not read a server's rows yet",
+    )
 }
 
 /// `database`, if the server's catalog lists it. A system database is never
