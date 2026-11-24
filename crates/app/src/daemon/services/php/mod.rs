@@ -112,12 +112,21 @@ pub fn fallback_port(minor: PhpMinor) -> u16 {
 /// `runtimes/php/<version>/bin/php-fpm` on macOS and Linux. `None` where the
 /// recipe has no `php-fpm` (Windows).
 pub fn fpm_program(data_dir: &Path, platform: Platform, version: &Version) -> Option<PathBuf> {
+    php_program(data_dir, platform, version, "php-fpm")
+}
+
+/// Where the recipe puts program `name` (`php`, `php-fpm`) of PHP
+/// `version`. `None` where the recipe has no such program.
+pub fn php_program(
+    data_dir: &Path,
+    platform: Platform,
+    version: &Version,
+    name: &str,
+) -> Option<PathBuf> {
     // A test parses every built-in recipe, so an error here never ships.
     let recipe = recipes::builtin(Runtime::Php).ok()?;
     let version_dir = RuntimesDir::in_dir(data_dir).version_dir(Runtime::Php, version);
-    recipe
-        .platform(platform)?
-        .program_path(&version_dir, "php-fpm")
+    recipe.platform(platform)?.program_path(&version_dir, name)
 }
 
 /// How the supervisor runs the pool of `files`: `program --nodaemonize

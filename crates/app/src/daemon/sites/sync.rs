@@ -12,6 +12,8 @@
 //!    when it first loads a config, with or without sites.
 //! 4. PHP again if the bundle just appeared: `php.ini` then points to it, so
 //!    those pools restart.
+//! 5. The sites' workers ([`WorkerManager::sync`]), once `php.ini` is
+//!    written: `queue:work` and `schedule:work` where a site asks for them.
 //!
 //! After each pass, and after the routes that waited for it have their
 //! answer: on Windows, the sites' names in the hosts file ([`HostsSync`]).
@@ -27,6 +29,7 @@
 //! after a pass that started after it, so that pass saw the change.
 //!
 //! [`CaddyManager::apply`]: crate::daemon::services::caddy::CaddyManager::apply
+//! [`WorkerManager::sync`]: crate::daemon::workers::WorkerManager::sync
 
 use marsa_core::types::ServiceId;
 use std::sync::{Arc, OnceLock};
@@ -45,6 +48,7 @@ use tracing::{debug, warn};
 use super::hosts_sync::HostsSync;
 use crate::daemon::services::php::{PhpManager, SystemRoots, write_ca_bundle};
 use crate::daemon::state::Daemon;
+use crate::daemon::workers::WorkerManager;
 
 /// How long a pass waits after the first event, so a burst of changes (a
 /// parked folder with many sites, a few patches in a row) makes one pass.
@@ -137,6 +141,7 @@ async fn run(
 ) {
     let platform = Platform::current();
     let mut php = PhpManager::new(daemon.data_dir(), platform);
+    let mut workers = WorkerManager::new(daemon.data_dir(), platform);
     let mut hosts = HostsSync::new();
     let system = SystemRoots::of(platform);
     // Windows' roots change without an event (automatic root update, group
@@ -157,7 +162,7 @@ async fn run(
         take_queued(&mut requests, &mut replies);
         tokio::select! {
             () = shutdown.cancelled() => return,
-            () = pass(&daemon, &mut php, &system) => {}
+            () = pass(&daemon, &mut php, &mut workers, &system) => {}
         }
         for reply in replies.drain(..) {
             // `Err` only when the route is gone (its client hung up).
@@ -250,23 +255,39 @@ fn skip_waiting(events: &mut broadcast::Receiver<Event>) {
     }
 }
 
-/// One pass: PHP, Caddy, the CA bundle, then PHP again if the bundle is new.
-async fn pass(daemon: &Daemon, php: &mut PhpManager, system: &SystemRoots) {
+/// One pass: PHP, Caddy, the CA bundle, PHP again if the bundle is new,
+/// then the workers.
+async fn pass(
+    daemon: &Daemon,
+    php: &mut PhpManager,
+    workers: &mut WorkerManager,
+    system: &SystemRoots,
+) {
     let sites = daemon.sites().map(|list| list.sites).unwrap_or_default();
+    php_and_caddy(daemon, php, system, &sites).await;
+    workers.sync(daemon, &sites).await;
+}
+
+async fn php_and_caddy(
+    daemon: &Daemon,
+    php: &mut PhpManager,
+    system: &SystemRoots,
+    sites: &[Site],
+) {
     let bundle = daemon.caddy().paths.ca_bundle();
     let had_bundle = tokio::fs::try_exists(&bundle).await.unwrap_or(false);
     let ca = had_bundle.then_some(bundle.as_path());
-    let pools = php.sync(daemon, &sites, ca).await;
-    apply_caddy(daemon, &sites, pools.clone()).await;
+    let pools = php.sync(daemon, sites, ca).await;
+    apply_caddy(daemon, sites, pools.clone()).await;
 
     if !write_bundle(&daemon.caddy().paths, system).await || had_bundle {
         return;
     }
-    let again = php.sync(daemon, &sites, Some(&bundle)).await;
+    let again = php.sync(daemon, sites, Some(&bundle)).await;
     // The addresses do not depend on `php.ini`, but a pool that failed to
     // start again changes them.
     if again != pools {
-        apply_caddy(daemon, &sites, again).await;
+        apply_caddy(daemon, sites, again).await;
     }
 }
 

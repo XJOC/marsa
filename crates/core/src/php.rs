@@ -131,6 +131,10 @@ pub enum Listen {
     Tcp(u16),
 }
 
+/// PHP reads its `php.ini` from this path: the shim sets it for the
+/// terminal, and the daemon for a site's workers and the programs they start.
+pub const PHPRC: &str = "PHPRC";
+
 /// Every path that the config of one PHP version uses. The paths are final:
 /// the render functions print them as they are.
 ///

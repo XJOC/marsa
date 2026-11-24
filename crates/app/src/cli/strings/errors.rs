@@ -279,6 +279,10 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "{service_first} starts and stops with the sites that need its PHP version, so it \
              cannot be started or stopped by hand. Run \"marsa logs {id}\" to see its lines."
         ),
+        "php_not_installed" => format!(
+            "{id} needs the site's PHP, and none that the site can run is installed. Run \
+             \"marsa sites\" to see the site's PHP, then \"marsa install php <version>\"."
+        ),
         "worker_failed" => format!(
             "{id} stopped after it crashed again and again. Run \"marsa logs {id}\" to see why, \
              fix it, then run \"marsa services restart {id}\"."
