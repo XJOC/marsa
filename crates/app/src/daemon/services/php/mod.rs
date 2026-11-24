@@ -632,7 +632,7 @@ impl PhpManager {
             pid_file.discard();
             return Ok(());
         };
-        let accepted = orphan::installed_programs(&self.data_dir, platform);
+        let accepted = orphan::installed_programs(&self.data_dir, platform, "php-fpm");
         let orphans = Orphans {
             pid_file,
             processes: &*self.processes,

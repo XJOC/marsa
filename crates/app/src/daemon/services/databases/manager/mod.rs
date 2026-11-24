@@ -29,6 +29,7 @@ use super::init::{installed_programs, installed_servers};
 use super::orphan;
 use super::settings::{any_installed, read_settings, save_enabled};
 use crate::daemon::services::actions::{Busy, take_turn};
+use crate::daemon::services::pid_record::{self, Cleared};
 use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
 use crate::daemon::services::supervisor::{EXITED, ServiceRuntime, lock};
 use crate::daemon::state::Daemon;
@@ -59,7 +60,7 @@ pub struct ServerManager {
     /// The system whose programs run: [`Platform::current`].
     platform: Option<Platform>,
     /// How an old server that a crashed `marsad` left running is stopped
-    /// before a start ([`orphan::clear`]): [`ServerKind::stop`], then
+    /// before a start ([`pid_record::clear`]): [`ServerKind::stop`], then
     /// SIGKILL.
     pub(super) orphan_ladder: StopMethod,
     /// Whether `marsad` runs with an administrator's token, asked at each
@@ -452,7 +453,7 @@ impl ServerManager {
 
     /// Stops the task by the spec (for PostgreSQL SIGINT, then SIGQUIT),
     /// then a kill. When this daemon runs none, our old server that an
-    /// earlier `marsad` left running is stopped instead ([`orphan::clear`]),
+    /// earlier `marsad` left running is stopped instead ([`pid_record::clear`]),
     /// with a few looks when the system cannot tell who runs its pid. If it
     /// cannot be stopped or told, the recent lines say why, and the stop
     /// still ends as one: the next start refuses while it holds the port.
@@ -484,27 +485,20 @@ impl ServerManager {
         let servers = installed_servers(kind, daemon.data_dir(), platform);
         let ladder = &self.orphan_ladder;
         let probes = &*self.probes;
-        let looks = orphan::STOP_LOOKS;
-        let cleared = orphan::clear(
-            kind,
-            probes,
-            daemon.data_dir(),
-            &servers,
-            ladder,
-            port,
-            looks,
-        );
+        let looks = pid_record::STOP_LOOKS;
+        let owner = orphan::owner(kind, daemon.data_dir(), port);
+        let cleared = pid_record::clear(&owner, probes, &servers, ladder, looks);
         match cleared.await {
-            Ok(orphan::Cleared::Stopped { pid, signal }) => {
+            Ok(Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
                 lock(&self.runtime).note(daemon.events(), &text);
             }
-            Ok(orphan::Cleared::Nothing | orphan::Cleared::Forgotten) => {}
-            Ok(orphan::Cleared::Unknown { pid }) => {
+            Ok(Cleared::Nothing | Cleared::Forgotten) => {}
+            Ok(Cleared::Unknown { pid }) => {
                 let text = orphan::unknown_line(kind, pid);
                 lock(&self.runtime).note(daemon.events(), &text);
             }
-            Err(orphan::Stuck(reason)) => {
+            Err(pid_record::Stuck(reason)) => {
                 warn!(%reason, server = kind.id(), "our old server did not stop");
                 lock(&self.runtime).note(daemon.events(), &format!("marsad: {reason}."));
             }
