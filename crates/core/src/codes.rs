@@ -143,6 +143,8 @@ pub const PHP_CONFIG_WRITE: &str = "php_config_write";
 pub const PHP_FPM_NOT_INSTALLED: &str = "php_fpm_not_installed";
 pub const PHP_FPM_ORPHAN_STUCK: &str = "php_fpm_orphan_stuck";
 pub const PHP_FPM_UNAVAILABLE: &str = "php_fpm_unavailable";
+/// A site's worker needs the site's PHP, and no PHP that the site can run is installed.
+pub const PHP_NOT_INSTALLED: &str = "php_not_installed";
 pub const PHP_PATH_NOT_ALLOWED: &str = "php_path_not_allowed";
 /// Another program holds a port Caddy needs.
 pub const PORT_IN_USE: &str = "port_in_use";
@@ -415,6 +417,7 @@ pub const ALL: &[&str] = &[
     PHP_FPM_NOT_INSTALLED,
     PHP_FPM_ORPHAN_STUCK,
     PHP_FPM_UNAVAILABLE,
+    PHP_NOT_INSTALLED,
     PHP_PATH_NOT_ALLOWED,
     PORT_IN_USE,
     PORTS_APPLY_FAILED,

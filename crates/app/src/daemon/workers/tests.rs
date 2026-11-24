@@ -1,0 +1,353 @@
+use super::*;
+use std::time::Duration;
+
+use tempfile::TempDir;
+
+fn site(root: &Path, kind: SiteKind, php: Option<&str>, queue: bool, schedule: bool) -> Site {
+    Site {
+        name: "shop".to_owned(),
+        root: root.to_owned(),
+        docroot: root.join("public"),
+        kind,
+        php: php.map(|version| semver::Version::parse(version).unwrap()),
+        php_source: None,
+        secure: true,
+        queue,
+        schedule,
+    }
+}
+
+#[test]
+fn only_laravel_sites_that_ask_get_workers() {
+    let data = Path::new("/data");
+    let root = Path::new("/code/shop");
+    let platform = Some(Platform::LinuxX64);
+    let both = site(root, SiteKind::Laravel, Some("8.4.1"), true, true);
+    let ids: Vec<String> = wanted(data, platform, &[both])
+        .keys()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(ids, ["queue-shop", "schedule-shop"]);
+    for other in [
+        SiteKind::Php,
+        SiteKind::Static,
+        SiteKind::NodeProxy { port: 5173 },
+    ] {
+        let asks = site(root, other, Some("8.4.1"), true, true);
+        assert!(wanted(data, platform, &[asks]).is_empty());
+    }
+    let off = site(root, SiteKind::Laravel, Some("8.4.1"), false, false);
+    assert!(wanted(data, platform, &[off]).is_empty());
+}
+
+#[test]
+fn a_worker_runs_the_sites_php_cli_with_its_php_ini() {
+    let data = Path::new("/data");
+    let root = Path::new("/code/shop");
+    let shop = site(root, SiteKind::Laravel, Some("8.4.1"), true, false);
+    let key = SiteKey::new("shop").unwrap();
+    let plan = plan(
+        data,
+        Some(Platform::LinuxX64),
+        &shop,
+        WorkerKind::Queue,
+        key,
+    )
+    .unwrap();
+    assert_eq!(plan.spec.program, data.join("runtimes/php/8.4.1/bin/php"));
+    assert_eq!(
+        plan.spec.args[1],
+        data.join("php/8.4/php.ini").to_string_lossy()
+    );
+    assert_eq!(plan.spec.cwd.as_deref(), Some(root));
+    let windows = super::plan(
+        data,
+        Some(Platform::WindowsX64),
+        &shop,
+        WorkerKind::Queue,
+        key,
+    );
+    assert_eq!(
+        windows.unwrap().spec.program.file_name().unwrap(),
+        "php.exe"
+    );
+}
+
+#[test]
+fn a_site_without_php_or_a_system_without_builds_cannot_run_a_worker() {
+    let data = Path::new("/data");
+    let root = Path::new("/code/shop");
+    let key = SiteKey::new("shop").unwrap();
+    let none = site(root, SiteKind::Laravel, None, true, false);
+    let refused = plan(
+        data,
+        Some(Platform::LinuxX64),
+        &none,
+        WorkerKind::Queue,
+        key,
+    );
+    assert_eq!(refused, Err(codes::PHP_NOT_INSTALLED));
+    let shop = site(root, SiteKind::Laravel, Some("8.4.1"), true, false);
+    let refused = plan(data, None, &shop, WorkerKind::Queue, key);
+    assert_eq!(refused, Err(codes::PHP_NOT_INSTALLED));
+}
+
+// The fake PHP is a shell script, and the tests send signals: Unix only.
+// Windows runs the same manager; its stop is the supervisor's kill.
+#[cfg(unix)]
+mod real {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::Arc;
+
+    use marsa_core::services::RestartPolicy;
+
+    /// A fake PHP CLI: prints how it was run, then fails while the site has a
+    /// file `fail`, or runs until stopped.
+    const FAKE_PHP: &str = "#!/bin/sh\n\
+        echo \"fake $0 $*\"\n\
+        if [ -f fail ]; then exit 1; fi\n\
+        exec sleep 600\n";
+
+    const WAIT: Duration = Duration::from_secs(30);
+
+    struct Setup {
+        _temp: TempDir,
+        data: PathBuf,
+        root: PathBuf,
+        daemon: Arc<Daemon>,
+        manager: WorkerManager,
+    }
+
+    fn setup() -> Setup {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let root = temp.path().join("shop");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("artisan"), "<?php\n").unwrap();
+        let daemon = Arc::new(Daemon::new(data.clone()));
+        let mut manager = WorkerManager::new(&data, Platform::current());
+        manager.restart = RestartPolicy::Always {
+            max_retries: 2,
+            initial: Duration::from_millis(20),
+            max: Duration::from_millis(50),
+        };
+        Setup {
+            _temp: temp,
+            data,
+            root,
+            daemon,
+            manager,
+        }
+    }
+
+    fn install_php(data: &Path, version: &str) {
+        let bin = data.join("runtimes/php").join(version).join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let php = bin.join("php");
+        fs::write(&php, FAKE_PHP).unwrap();
+        fs::set_permissions(&php, fs::Permissions::from_mode(0o755)).unwrap();
+        let minor = version.rsplit_once('.').unwrap().0;
+        let ini = data.join("php").join(minor);
+        fs::create_dir_all(&ini).unwrap();
+        fs::write(ini.join("php.ini"), format!("; php {version}\n")).unwrap();
+    }
+
+    fn queue() -> ServiceId {
+        ServiceId::Worker(WorkerKind::Queue, SiteKey::new("shop").unwrap())
+    }
+
+    /// Waits until the status of the queue worker passes `ok`.
+    async fn wait_for(daemon: &Daemon, ok: impl Fn(&ServiceStatus) -> bool) -> ServiceStatus {
+        let wait = async {
+            loop {
+                let found = daemon.workers().find(queue());
+                let status = found.map(|runtime| lock(&runtime).status.clone());
+                if let Some(status) = status.filter(|status| ok(status)) {
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(WAIT, wait)
+            .await
+            .expect("the status in time")
+    }
+
+    fn running(status: &ServiceStatus) -> bool {
+        status.state == ServiceState::Running && status.pid.is_some()
+    }
+
+    fn alive(pid: u32) -> bool {
+        std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    fn kill(pid: u32) {
+        let killed = std::process::Command::new("/bin/kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+    }
+
+    fn lines(daemon: &Daemon) -> String {
+        let runtime = daemon.workers().find(queue()).unwrap();
+        let lines = lock(&runtime).logs.recent();
+        lines
+            .iter()
+            .map(|line| format!("{}\n", line.text))
+            .collect()
+    }
+
+    /// Waits until the worker's lines hold `needle`: a line comes a moment
+    /// after the `running` state.
+    async fn wait_line(daemon: &Daemon, needle: &str) {
+        let wait = async {
+            while !lines(daemon).contains(needle) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        let found = tokio::time::timeout(WAIT, wait).await;
+        assert!(found.is_ok(), "no {needle:?} in {}", lines(daemon));
+    }
+
+    /// The process is gone soon after its stop: `kill -0` may still see it
+    /// for an instant while the system reaps it.
+    async fn gone(pid: u32) {
+        let wait = async {
+            while alive(pid) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(WAIT, wait)
+            .await
+            .expect("the process ended");
+    }
+
+    #[tokio::test]
+    async fn a_worker_runs_restarts_after_a_crash_and_stops_when_turned_off() {
+        let Setup {
+            _temp,
+            data,
+            root,
+            daemon,
+            mut manager,
+        } = setup();
+        install_php(&data, "8.4.1");
+        let on = site(&root, SiteKind::Laravel, Some("8.4.1"), true, false);
+        manager.sync(&daemon, std::slice::from_ref(&on)).await;
+        let first = wait_for(&daemon, running).await;
+        let php = data.join("runtimes/php/8.4.1/bin/php");
+        let ini = data.join("php/8.4/php.ini");
+        let ran = format!(
+            "fake {} -c {} artisan queue:work",
+            php.display(),
+            ini.display()
+        );
+        wait_line(&daemon, &ran).await;
+        assert_eq!(daemon.workers().statuses().len(), 1);
+
+        let pid = first.pid.unwrap();
+        kill(pid);
+        let again = wait_for(&daemon, |s| running(s) && s.pid != Some(pid)).await;
+        assert_eq!(again.restarts, 1);
+        wait_line(&daemon, "marsad: signal: 9").await;
+
+        // A pass with nothing changed leaves the running worker alone.
+        manager.sync(&daemon, std::slice::from_ref(&on)).await;
+        assert_eq!(wait_for(&daemon, running).await.pid, again.pid);
+
+        let off = site(&root, SiteKind::Laravel, Some("8.4.1"), false, false);
+        manager.sync(&daemon, &[off]).await;
+        assert!(daemon.workers().find(queue()).is_none());
+        assert!(daemon.workers().statuses().is_empty());
+        assert!(!daemon.proc_alive(queue()));
+        gone(again.pid.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn a_worker_that_keeps_failing_stays_failed_until_a_restart() {
+        let Setup {
+            _temp,
+            data,
+            root,
+            daemon,
+            mut manager,
+        } = setup();
+        install_php(&data, "8.4.1");
+        fs::write(root.join("fail"), "").unwrap();
+        let on = site(&root, SiteKind::Laravel, Some("8.4.1"), true, false);
+        manager.sync(&daemon, std::slice::from_ref(&on)).await;
+        let worker_failed = |s: &ServiceStatus| matches!(&s.state, ServiceState::Failed { code } if code == codes::WORKER_FAILED);
+        let failed = wait_for(&daemon, worker_failed).await;
+        assert_eq!(failed.restarts, 2);
+        assert!(!daemon.proc_alive(queue()));
+
+        // A pass does not start it again.
+        fs::remove_file(root.join("fail")).unwrap();
+        manager.sync(&daemon, std::slice::from_ref(&on)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(worker_failed(&wait_for(&daemon, |_| true).await));
+
+        // A restart asked for does.
+        daemon.workers().ask_restart(queue());
+        manager.sync(&daemon, std::slice::from_ref(&on)).await;
+        let back = wait_for(&daemon, running).await;
+        assert_eq!(back.restarts, 0);
+        daemon.stop_procs(WAIT).await;
+        gone(back.pid.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn a_site_without_php_gets_a_failed_worker_and_no_process() {
+        let Setup {
+            _temp,
+            root,
+            daemon,
+            mut manager,
+            ..
+        } = setup();
+        let on = site(&root, SiteKind::Laravel, None, true, false);
+        manager.sync(&daemon, std::slice::from_ref(&on)).await;
+        let status = wait_for(&daemon, |_| true).await;
+        let code = codes::PHP_NOT_INSTALLED.to_owned();
+        assert_eq!(status.state, ServiceState::Failed { code });
+        assert!(!daemon.proc_alive(queue()));
+        let note = format!(
+            "marsad: the worker cannot run: {}\n",
+            codes::PHP_NOT_INSTALLED
+        );
+        assert_eq!(lines(&daemon), note);
+        // Once: a second pass adds no line.
+        manager.sync(&daemon, &[on]).await;
+        assert_eq!(lines(&daemon), note);
+    }
+
+    #[tokio::test]
+    async fn another_php_version_replaces_the_process() {
+        let Setup {
+            _temp,
+            data,
+            root,
+            daemon,
+            mut manager,
+        } = setup();
+        install_php(&data, "8.4.1");
+        install_php(&data, "8.3.2");
+        let new = site(&root, SiteKind::Laravel, Some("8.4.1"), true, false);
+        manager.sync(&daemon, &[new]).await;
+        let first = wait_for(&daemon, running).await;
+        let old = site(&root, SiteKind::Laravel, Some("8.3.2"), true, false);
+        manager.sync(&daemon, &[old]).await;
+        let second = wait_for(&daemon, |s| running(s) && s.pid != first.pid).await;
+        gone(first.pid.unwrap()).await;
+        wait_line(&daemon, "runtimes/php/8.3.2/bin/php -c").await;
+        daemon.stop_procs(WAIT).await;
+        gone(second.pid.unwrap()).await;
+    }
+}

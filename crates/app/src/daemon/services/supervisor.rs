@@ -309,9 +309,15 @@ async fn supervise(spec: ServiceSpec, shared: Shared, cancel: CancellationToken)
                 codes::SPAWN_FAILED
             }
         };
+        let delay = restart_delay(spec.restart, restarts);
+        // A worker whose restarts ran out says so: its log says why.
+        let code = match delay {
+            None if spec.id.is_worker() && code == EXITED => codes::WORKER_FAILED,
+            _ => code,
+        };
         let failed = ServiceState::Failed { code: code.into() };
         shared.set_state(failed, None, restarts);
-        let Some(delay) = restart_delay(spec.restart, restarts) else {
+        let Some(delay) = delay else {
             return;
         };
         tokio::select! {
