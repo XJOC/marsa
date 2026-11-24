@@ -6,6 +6,7 @@ pub mod db_browser;
 pub mod dumps;
 pub mod http;
 pub mod jobs;
+pub mod log_filter;
 pub mod mail;
 pub mod runtimes;
 pub mod services;

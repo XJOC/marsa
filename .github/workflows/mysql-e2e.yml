@@ -25,6 +25,9 @@ on:
       - "crates/core/src/platform/process/**"
       - "recipes/mysql.toml"
       - "tools/e2e/mysql.sh"
+      - "tools/e2e/api.sh"
+      - "crates/app/src/daemon/db_browser/**"
+      - "crates/core/src/db_browser/**"
       - "tools/libaio-build/**"
       - ".github/workflows/mysql-e2e.yml"
   push:
@@ -40,6 +43,9 @@ on:
       - "crates/core/src/platform/process/**"
       - "recipes/mysql.toml"
       - "tools/e2e/mysql.sh"
+      - "tools/e2e/api.sh"
+      - "crates/app/src/daemon/db_browser/**"
+      - "crates/core/src/db_browser/**"
       - "tools/libaio-build/**"
       - ".github/workflows/mysql-e2e.yml"
 

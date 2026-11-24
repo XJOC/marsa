@@ -193,6 +193,36 @@ $db->exec("insert into migrations (migration) values (\x27create_users_table\x27
 echo $db->query("select count(*) from migrations")->fetchColumn(), "\n";
 ' | grep -qx 1 || fail "pdo_mysql"
 
+step "the database browser: app and its tables, none of the server's own, and a close that closes"
+# shellcheck source=api.sh
+source "$(dirname "$0")/api.sh"
+sources=$(api_ok GET /v1/db/sources)
+[ "$(jq -r '.servers[] | select(.server == "mysql") | .state' <<<"$sources")" = running ] || fail "sources: $sources"
+names=$(jq -c '[.servers[] | select(.server == "mysql") | .databases[].name]' <<<"$sources")
+echo "databases: $names"
+jq -e 'index("app") != null and all(.[]; IN("mysql", "sys", "performance_schema", "information_schema") | not)' <<<"$names" >/dev/null ||
+  fail "databases: $names"
+tables=$(api_ok POST /v1/db/tables '{"source": {"kind": "server", "server": "mysql", "database": "app"}}')
+[ "$(jq -c '[.tables[] | [.table.name, .kind]]' <<<"$tables")" = '[["migrations","table"],["posts","table"]]' ] || fail "tables: $tables"
+[ "$(api_status POST /v1/db/tables '{"source": {"kind": "server", "server": "mysql", "database": "mysql"}}')" = "404 db_not_found" ] ||
+  fail "a system database was opened"
+# One connection for each source (the server's catalog, and app), no pool,
+# both over TCP: the socket's root would show `localhost` as its host.
+others="select count(*) from information_schema.processlist where user = 'root' and host like '127.0.0.1:%' and id <> connection_id()"
+[ "$(tcp -e "$others")" = 2 ] || fail "$(tcp -e "$others") browser connections, not 2"
+api_ok POST /v1/db/close >/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ "$(tcp -e "$others")" = 0 ] && break
+  sleep 0.5
+done
+[ "$(tcp -e "$others")" = 0 ] || fail "a browser connection stayed open after close"
+# root over TCP with a password: the browser says so, and asks nothing else.
+sock -e "alter user 'root'@'127.0.0.1' identified by 'e2e-secret'"
+problem=$(api_ok GET /v1/db/sources | jq -r '.servers[] | select(.server == "mysql") | .problem')
+sock -e "alter user 'root'@'127.0.0.1' identified by ''"
+[ "$problem" = db_sign_in_failed ] || fail "with a password for root: $problem"
+api_ok POST /v1/db/close >/dev/null
+
 step "the running version cannot be uninstalled; its databases stay"
 refused 'in use' marsa uninstall mysql "$VERSION"
 [ -d "$MY" ] || fail "the running version was removed"

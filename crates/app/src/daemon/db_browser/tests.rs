@@ -9,6 +9,8 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection};
 use tempfile::TempDir;
 
+use marsa_core::types::DbServer;
+
 use super::sqlite;
 use crate::daemon::http::test_router::TestRouter;
 use crate::daemon::state::Daemon;
@@ -21,6 +23,7 @@ const ROUTES: [(&str, &str); 3] = [
 
 struct App {
     dir: TempDir,
+    daemon: Arc<Daemon>,
     router: TestRouter,
 }
 
@@ -29,8 +32,13 @@ impl App {
         let dir = tempfile::tempdir().expect("temp dir");
         let data = dir.path().join("data");
         fs::create_dir_all(&data).unwrap();
-        let router = TestRouter::new(Arc::new(Daemon::new(data)));
-        Self { dir, router }
+        let daemon = Arc::new(Daemon::new(data));
+        let router = TestRouter::new(Arc::clone(&daemon));
+        Self {
+            dir,
+            daemon,
+            router,
+        }
     }
 
     /// A linked site `name` with an empty project folder.
@@ -92,6 +100,40 @@ async fn with_no_site_and_no_server_there_is_nothing_to_open() {
     let (status, json) = app.router.answer("GET", "/v1/db/sources", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json, json!({ "servers": [], "files": [] }));
+}
+
+/// A server that is installed and stopped is listed with its state, and no
+/// connection is tried: the browser is not even made.
+#[tokio::test]
+async fn an_installed_server_that_does_not_run_is_listed_without_a_connection() {
+    let app = App::new();
+    let version = app
+        .dir
+        .path()
+        .join("data")
+        .join("runtimes")
+        .join("mysql")
+        .join("8.4.13");
+    fs::create_dir_all(version).unwrap();
+    let (status, json) = app.router.answer("GET", "/v1/db/sources", None).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let servers = json["servers"].as_array().unwrap();
+    assert_eq!(servers.len(), 1, "{json}");
+    assert_eq!(servers[0]["server"], "mysql");
+    assert_eq!(servers[0]["state"], "stopped");
+    assert_eq!(servers[0]["databases"], json!([]));
+    assert!(servers[0].get("problem").is_none(), "{json}");
+    assert!(app.daemon.open_db_browser().is_none());
+
+    let body = json!({ "kind": "server", "server": "mysql", "database": "shop" });
+    let (status, json) = app.tables(body).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(json["error"]["code"], "db_server_not_running");
+    assert!(app.daemon.open_db_browser().is_none());
+
+    // Close makes nothing either.
+    app.router.send("POST", "/v1/db/close", None).await;
+    assert!(app.daemon.open_db_browser().is_none());
 }
 
 #[tokio::test]
@@ -418,4 +460,115 @@ async fn the_log_holds_no_name_or_value_from_the_database() {
     connection.close().await.unwrap();
     let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(log.contains("SELECT count(*) FROM secret_table_x"), "{log}");
+}
+
+/// A server's stop closes the browser's connections to it first, and keeps
+/// the others.
+#[tokio::test]
+async fn a_server_stop_closes_its_browser_sources_first() {
+    let app = App::new();
+    let store = &app.daemon.db_browser().store;
+    store.slot(&(DbServer::Mysql, Some("shop".to_owned())));
+    store.slot(&(DbServer::Mysql, None));
+    store.slot(&(DbServer::Postgres, Some("app".to_owned())));
+    let (status, json) = app
+        .router
+        .answer("POST", "/v1/services/mysql/stop", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(store.open(), [(DbServer::Postgres, Some("app".to_owned()))]);
+}
+
+/// What a server's error becomes: its text goes to `detail` only.
+mod server_errors {
+    use std::borrow::Cow;
+    use std::error::Error as StdError;
+    use std::fmt;
+
+    use sqlx::error::{DatabaseError, ErrorKind};
+
+    use super::super::servers::db_error;
+
+    #[derive(Debug)]
+    struct Fake(&'static str);
+
+    impl fmt::Display for Fake {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("the server's own words")
+        }
+    }
+
+    impl StdError for Fake {}
+
+    impl DatabaseError for Fake {
+        fn message(&self) -> &str {
+            "the server's own words"
+        }
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.0))
+        }
+        fn as_error(&self) -> &(dyn StdError + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn StdError + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn StdError + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+    }
+
+    fn mapped(code: &'static str) -> (u16, &'static str, String, String) {
+        let err = db_error(sqlx::Error::Database(Box::new(Fake(code))));
+        (
+            err.status.as_u16(),
+            err.code,
+            err.message,
+            err.detail.unwrap_or_default(),
+        )
+    }
+
+    #[test]
+    fn a_refused_sign_in_is_its_own_code() {
+        for code in ["28P01", "28000"] {
+            let (status, code, message, detail) = mapped(code);
+            assert_eq!((status, code), (502, "db_sign_in_failed"));
+            assert!(!message.contains("own words"), "{message}");
+            assert!(detail.contains("own words"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn the_servers_time_limit_is_a_timeout() {
+        let (status, code, _, detail) = mapped("57014");
+        assert_eq!((status, code), (504, "db_timeout"));
+        assert!(detail.contains("own words"), "{detail}");
+    }
+
+    /// `PGOPTIONS` would reach the startup packet: the browser refuses.
+    #[test]
+    fn startup_options_from_the_environment_are_refused() {
+        use sqlx::postgres::PgConnectOptions;
+
+        use super::super::servers::no_startup_options;
+
+        let plain = PgConnectOptions::new_without_pgpass();
+        if plain.get_options().is_none() {
+            assert!(no_startup_options(&plain).is_ok());
+        }
+        let with = plain.options([("search_path", "elsewhere")]);
+        let err = no_startup_options(&with).unwrap_err();
+        assert_eq!(err.code, "db_unavailable");
+    }
+
+    #[test]
+    fn any_other_failure_is_unavailable_with_the_reason() {
+        let (status, code, message, detail) = mapped("42P01");
+        assert_eq!((status, code), (502, "db_unavailable"));
+        assert_eq!(message, "the database could not be read");
+        assert!(detail.contains("own words"), "{detail}");
+    }
 }

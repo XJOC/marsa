@@ -14,8 +14,8 @@ use std::sync::Mutex;
 use anyhow::Context as _;
 use clap::Parser;
 use marsa::daemon::http::server::{self, AlreadyRunning};
+use marsa::daemon::log_filter::{log_filter, no_driver_log};
 use marsa::daemon::services::supervisor::{LOG_FILE_LIMIT, LogFile};
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -95,10 +95,7 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
     let path = logs.join("marsad.log");
     let file = LogFile::open(&path, LOG_FILE_LIMIT)
         .with_context(|| format!("cannot open {}", path.display()))?;
-    // hickory logs two `info` lines for every DNS query, so every `.test`
-    // lookup of a browser would fill the log.
-    let filter = EnvFilter::try_from_env("MARSA_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info,hickory_server=warn"));
+    let filter = log_filter(std::env::var("MARSA_LOG").ok().as_deref());
     let to_file = tracing_subscriber::fmt::layer()
         .with_writer(Mutex::new(file))
         .with_ansi(false);
@@ -106,6 +103,7 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
         .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
     tracing_subscriber::registry()
         .with(filter)
+        .with(no_driver_log())
         .with(to_file)
         .with(to_stderr)
         .try_init()
