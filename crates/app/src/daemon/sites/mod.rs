@@ -3,6 +3,10 @@
 pub mod api;
 mod build;
 pub mod hosts_sync;
+// The routes that use it come in the next change; until then only the tests
+// call it.
+#[cfg_attr(not(test), allow(dead_code))]
+mod log;
 pub mod sync;
 pub mod watch;
 
