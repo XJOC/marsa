@@ -208,6 +208,7 @@ pub enum Route {
     Runtimes(Runtime),
     Services,
     Logs(LogSource),
+    Mail,
     Settings,
 }
 
@@ -533,8 +534,10 @@ impl Model {
                 if let Route::Runtimes(runtime) = &route {
                     self.runtime_chosen = Some(*runtime);
                 }
+                // No event carries mail: the screen reads it as it opens.
+                let read = route == Route::Mail;
                 self.route = route;
-                None
+                if read { self.read_mail() } else { None }
             }
             Action::FoldSidebar => {
                 self.sidebar_folded = !self.sidebar_folded;

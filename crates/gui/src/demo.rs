@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review.
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|many-sites|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|many-sites|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|mail|mail-empty|mail-stopped|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -22,6 +22,8 @@ use marsa_core::types::{
 use crate::model::{
     Action, Autostart, InstallJob, LinkForm, LogLevel, Model, Removal, SitesNotice, Update, apply,
 };
+
+mod mail;
 
 /// The variable that names the state.
 const VAR: &str = "MARSA_GUI_DEMO";
@@ -82,6 +84,15 @@ pub enum Demo {
     /// `Logs` whose PHP 8.4 pool wrote a line wider than the window: open the
     /// pool's log and scroll sideways to read it.
     LogsLong,
+    /// The same as `Ok`, with Mailpit installed and running: five mails of
+    /// 214, three new, the newest opened.
+    Mail,
+    /// `Mail` with no mail yet.
+    MailEmpty,
+    /// `Mail` with Mailpit stopped.
+    MailStopped,
+    /// `Mail` with the confirmation of "Delete every mail?" open.
+    ConfirmDeleteMail,
     /// The same as `Ok`, with the confirmation of "Unlink shop.test?" open.
     ConfirmUnlink,
     /// `Runtimes`, with the confirmation of uninstalling PHP 8.3.27 open.
@@ -119,6 +130,10 @@ fn parse(name: &str) -> Option<Demo> {
         "logs-filtered" => Demo::LogsFiltered,
         "logs-no-match" => Demo::LogsNoMatch,
         "logs-long" => Demo::LogsLong,
+        "mail" => Demo::Mail,
+        "mail-empty" => Demo::MailEmpty,
+        "mail-stopped" => Demo::MailStopped,
+        "confirm-delete-mail" => Demo::ConfirmDeleteMail,
         "confirm-unlink" => Demo::ConfirmUnlink,
         "confirm-uninstall" => Demo::ConfirmUninstall,
         "notice-success" => Demo::NoticeSuccess,
@@ -203,6 +218,12 @@ pub fn fill(model: &mut Model, demo: Demo) {
         Demo::Logs | Demo::LogsFiltered | Demo::LogsNoMatch | Demo::LogsLong
     ) {
         logs_screen(model, demo);
+    }
+    if matches!(
+        demo,
+        Demo::Mail | Demo::MailEmpty | Demo::MailStopped | Demo::ConfirmDeleteMail
+    ) {
+        mail::fill(model, demo, php);
     }
 }
 
