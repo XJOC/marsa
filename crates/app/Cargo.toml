@@ -21,6 +21,8 @@ reqwest.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The database browser in marsad (ADR 0028): the only crate that has a driver.
+sqlx.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true

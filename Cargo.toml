@@ -51,6 +51,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+# The database browser in marsad (ADR 0028). No macros, migrations, JSON, type
+# crates, or TLS: values are read as text, and every connection is to
+# Marsa's own servers on 127.0.0.1.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql", "postgres", "sqlite"] }
 # No extra features: `Value` reads two keys from `composer.json` and
 # `package.json` (task M1-04), and typed structs read the manifest (M2-02).
 serde_json = { version = "1", default-features = false, features = ["std"] }

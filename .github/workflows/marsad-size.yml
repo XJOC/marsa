@@ -1,0 +1,96 @@
+name: marsad size
+
+# The database browser put marsad's first database driver (sqlx) in it, and
+# Marsa must stay light: marsad may grow by 6 MB at most against the last
+# commit before sqlx (ADR 0028, section 9). Runs when a dependency or the
+# browser's daemon code changes, because that is what links the drivers.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - crates/*/Cargo.toml
+      - crates/app/src/daemon/db_browser/**
+      - .github/workflows/marsad-size.yml
+  workflow_dispatch:
+
+# Read-only on purpose: the job never writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The last commit of main before sqlx: the baseline of the budget.
+  BASELINE: b5d82b5c319c4b9537bec5ced9767194560a8a74
+  # 6 MB, as the budget says.
+  MAX_GROWTH: 6291456
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  size:
+    name: marsad size (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-arm64
+            os: macos-latest
+          - label: windows-x64
+            os: windows-latest
+          - label: linux-x64
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The baseline commit is built too.
+          fetch-depth: 0
+
+      # Reads the pinned version from rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The window and the shim never link a database driver: only marsad
+      # talks to the databases (ADR 0028, section 1).
+      - name: Check that sqlx is absent from the window and the shim
+        if: runner.os == 'Linux'
+        run: |
+          failed=0
+          for package in marsa-gui marsa-shim; do
+            tree="$(cargo tree -p "$package" -e normal)"
+            if grep -q sqlx <<<"$tree"; then
+              echo "FAIL: sqlx in $package"
+              failed=1
+            else
+              echo "OK: sqlx is not in $package"
+            fi
+          done
+          exit "$failed"
+
+      - name: Build marsad at this change and at the baseline
+        run: |
+          exe=""
+          if [ "${{ runner.os }}" = "Windows" ]; then exe=".exe"; fi
+          cargo build -p marsa --release --bin marsad
+          cp "target/release/marsad$exe" "$RUNNER_TEMP/marsad-new$exe"
+          git worktree add --detach "$RUNNER_TEMP/baseline" "$BASELINE"
+          # The same target folder, so the dependencies both share build once.
+          (cd "$RUNNER_TEMP/baseline" && cargo build -p marsa --release --bin marsad --target-dir "$GITHUB_WORKSPACE/target")
+          new="$(wc -c < "$RUNNER_TEMP/marsad-new$exe" | tr -d ' ')"
+          base="$(wc -c < "target/release/marsad$exe" | tr -d ' ')"
+          growth=$((new - base))
+          echo "marsad: $new bytes; baseline $BASELINE: $base bytes; growth $growth (limit $MAX_GROWTH)"
+          if [ "$growth" -gt "$MAX_GROWTH" ]; then
+            echo "FAIL: marsad grew by more than $MAX_GROWTH bytes"
+            exit 1
+          fi
