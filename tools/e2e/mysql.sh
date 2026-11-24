@@ -247,6 +247,8 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.3
 done
 [ "$(tcp -e "$sleeping")" = 0 ] || fail "the cancelled statement still runs in MySQL"
+# Closes what the query step opened, so the next sign-in is a new one.
+api_ok POST /v1/db/close >/dev/null
 # root over TCP with a password: the browser says so, and asks nothing else.
 sock -e "alter user 'root'@'127.0.0.1' identified by 'e2e-secret'"
 problem=$(api_ok GET /v1/db/sources | jq -r '.servers[] | select(.server == "mysql") | .problem')
