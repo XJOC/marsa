@@ -1519,6 +1519,7 @@ async fn dumps_are_listed_after_an_id_cleared_and_switched() {
     let list = DumpList {
         status: DumpsStatus::Listening,
         latest_id: 5,
+        count: 1,
         dumps: vec![dump],
     };
     let bodies = Arc::new(Mutex::new(Vec::new()));

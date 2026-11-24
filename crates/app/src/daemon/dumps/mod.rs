@@ -115,6 +115,7 @@ impl DumpsService {
         DumpList {
             status: self.status(),
             latest_id: store.latest_id(),
+            count: store.count() as u64,
             dumps: store.list(after),
         }
     }

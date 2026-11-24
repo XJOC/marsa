@@ -5,6 +5,7 @@
 //! tokio channel. [`DaemonClient`] never leaves this module, so the token
 //! never reaches the drawing code (architecture.md section 3).
 
+mod dumps;
 mod mail;
 
 use std::path::{Path, PathBuf};
@@ -65,6 +66,12 @@ pub enum Command {
     ReadMailText(String),
     /// The confirmed "Delete all…" of Mail.
     ClearMail,
+    /// The Dumps screen opened: what is new.
+    ReadDumps,
+    /// "Clear" on Dumps.
+    ClearDumps,
+    /// The switch "Capture" on Dumps: on or off.
+    SetDumpsCapture(bool),
 }
 
 /// The window's end of the bridge.
@@ -249,6 +256,7 @@ async fn session(
     while commands.try_recv().is_ok() {}
     // Stops with this session when it is dropped.
     let mail = mail::Mail::start(&client, window);
+    let dumps = dumps::Dumps::start(&client, window);
     if !window.send(Update::Connected(health)) || !refresh(&client, window, &mail).await {
         return End::Closed;
     }
@@ -266,6 +274,9 @@ async fn session(
                     }
                     if let Event::ServiceChanged(status) = &event {
                         mail.follow(status);
+                    }
+                    if matches!(&event, Event::DumpsChanged { .. }) {
+                        dumps.send(dumps::Job::Read);
                     }
                     let installed = matches!(
                         &event,
@@ -294,6 +305,8 @@ async fn session(
                 // Events were dropped, so the table may be stale.
                 Some(Ok(StreamItem::Lagged(count))) => {
                     tracing::warn!(count, "the daemon dropped events; reading the state again");
+                    // One of them may have been `dumps_changed`.
+                    dumps.send(dumps::Job::Read);
                     if !refresh(&client, window, &mail).await {
                         return End::Closed;
                     }
@@ -309,6 +322,9 @@ async fn session(
                 Some(Command::ReadMail) => mail.send(mail::Job::Read),
                 Some(Command::ReadMailText(id)) => mail.send(mail::Job::Text(id)),
                 Some(Command::ClearMail) => mail.send(mail::Job::Clear),
+                Some(Command::ReadDumps) => dumps.send(dumps::Job::Read),
+                Some(Command::ClearDumps) => dumps.send(dumps::Job::Clear),
+                Some(Command::SetDumpsCapture(on)) => dumps.send(dumps::Job::Capture(on)),
                 Some(command) => run_command(&client, command, window.clone(), reread.clone()),
                 None => return End::Closed,
             },
@@ -563,6 +579,8 @@ fn run_command(
             }
             // The session's mail reader runs these, one at a time.
             Command::ReadMail | Command::ReadMailText(_) | Command::ClearMail => None,
+            // The session's dumps reader runs these, one at a time.
+            Command::ReadDumps | Command::ClearDumps | Command::SetDumpsCapture(_) => None,
             Command::SetXdebug(enabled) => Some(match client.set_xdebug(enabled).await {
                 Ok(state) => {
                     tracing::info!(enabled, "Xdebug changed");

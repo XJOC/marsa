@@ -2,18 +2,13 @@
 
 use std::collections::VecDeque;
 
-use marsa_core::types::Dump;
-
-/// The most dumps kept.
-pub(super) const MAX_DUMPS: usize = 500;
-/// The most text kept, over all dumps.
-pub(super) const MAX_BYTES: usize = 16 * 1024 * 1024;
+use marsa_core::types::{Dump, MAX_KEPT_BYTES, MAX_KEPT_DUMPS};
 
 #[derive(Debug, Default)]
 pub(super) struct Store {
     /// Oldest first.
     dumps: VecDeque<Dump>,
-    /// The text and strings of `dumps`, by [`cost`].
+    /// The text and strings of `dumps`, by [`Dump::weight`].
     bytes: usize,
     /// The `id` of the newest dump ever kept. Never goes back, so an id is
     /// not used twice, also after [`Store::clear`].
@@ -29,13 +24,13 @@ impl Store {
         dump.id = self.latest_id;
         // The daemon's clock: the line's own is not to be trusted.
         dump.received_at = now;
-        self.bytes += cost(&dump);
+        self.bytes += dump.weight();
         self.dumps.push_back(dump);
-        while self.dumps.len() > MAX_DUMPS || self.bytes > MAX_BYTES {
+        while self.dumps.len() > MAX_KEPT_DUMPS || self.bytes > MAX_KEPT_BYTES {
             let Some(oldest) = self.dumps.pop_front() else {
                 break;
             };
-            self.bytes -= cost(&oldest);
+            self.bytes -= oldest.weight();
         }
         self.latest_id
     }
@@ -63,16 +58,6 @@ impl Store {
     pub(super) fn count(&self) -> usize {
         self.dumps.len()
     }
-}
-
-/// What one dump takes in memory, near enough: its strings and a fixed part.
-fn cost(dump: &Dump) -> usize {
-    let strings = [&dump.source_file, &dump.uri, &dump.method, &dump.label];
-    let optional: usize = strings
-        .iter()
-        .map(|text| text.as_ref().map_or(0, String::len))
-        .sum();
-    dump.text.len() + optional + 128
 }
 
 #[cfg(test)]
@@ -124,12 +109,12 @@ mod tests {
     #[test]
     fn the_ring_drops_the_oldest_at_500() {
         let mut store = Store::default();
-        for i in 0..MAX_DUMPS + 20 {
+        for i in 0..MAX_KEPT_DUMPS + 20 {
             store.push(dump(&i.to_string()), 0);
         }
-        assert_eq!(store.count(), MAX_DUMPS);
+        assert_eq!(store.count(), MAX_KEPT_DUMPS);
         let all = store.list(None);
-        assert_eq!(all[0].id, (MAX_DUMPS + 20) as u64);
+        assert_eq!(all[0].id, (MAX_KEPT_DUMPS + 20) as u64);
         assert_eq!(all.last().map(|d| d.id), Some(21));
     }
 
@@ -142,7 +127,7 @@ mod tests {
         }
         // 100 x 200 KiB is 20 MiB: the oldest went.
         assert!(store.count() < 100);
-        assert!(store.count() * big.len() <= MAX_BYTES);
+        assert!(store.count() * big.len() <= MAX_KEPT_BYTES);
         assert_eq!(store.list(None)[0].id, 100);
     }
 }
