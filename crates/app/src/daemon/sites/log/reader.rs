@@ -32,6 +32,8 @@ use marsa_core::platform::files::open_no_follow;
 use marsa_core::sitelog::{self, LineSplitter, MAX_TAIL_BYTES, MAX_TAIL_LINES};
 use marsa_core::types::{SiteLog, SiteLogLine};
 
+mod follow;
+
 /// The size of one read. Lines are cut at `sitelog::MAX_LINE_BYTES`, so a
 /// read never holds more than this and one line.
 const CHUNK: usize = 64 * 1024;
@@ -186,6 +188,8 @@ pub(crate) struct Tail {
     dir: LogDir,
     /// The file read now.
     current: Option<Place>,
+    /// Other files read before in this stream, the last one last.
+    seen: Vec<Place>,
     splitter: LineSplitter,
     /// The `seq` of the next line.
     seq: u64,
@@ -204,6 +208,7 @@ impl Tail {
         let mut tail = Self {
             dir: LogDir::new(root),
             current: None,
+            seen: Vec::new(),
             splitter: LineSplitter::new(false),
             seq: 0,
         };
@@ -282,6 +287,8 @@ impl Tail {
 enum Lines {
     /// Read all, keep the last `n`.
     KeepLast(usize),
+    /// Stop after the piece that brings `n`.
+    StopAfter(usize),
 }
 
 /// What [`read_into`] did.
@@ -333,6 +340,7 @@ fn read_into(
                 out.drain(..out.len() - keep);
                 read.dropped = true;
             }
+            Lines::StopAfter(stop) if out.len() >= stop => return read,
             _ => {}
         }
     }
@@ -344,22 +352,32 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     /// A site root with `storage/logs`, and its temp folder kept alive.
-    fn site() -> (tempfile::TempDir, PathBuf) {
+    pub(super) fn site() -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("shop");
         fs::create_dir_all(root.join("storage/logs")).unwrap();
         (temp, root)
     }
 
-    fn logs(root: &Path) -> PathBuf {
+    pub(super) fn logs(root: &Path) -> PathBuf {
         root.join("storage/logs")
     }
 
-    fn texts(lines: &[SiteLogLine]) -> Vec<&str> {
+    pub(super) fn texts(lines: &[SiteLogLine]) -> Vec<&str> {
         lines.iter().map(|line| line.text.as_str()).collect()
     }
 
-    fn touch(path: &Path, secs: u64) {
+    pub(super) fn append(path: &Path, text: &str) {
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+    }
+
+    pub(super) fn touch(path: &Path, secs: u64) {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + secs);
         File::options()
             .write(true)
