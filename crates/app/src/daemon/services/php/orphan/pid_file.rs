@@ -109,25 +109,25 @@ impl PidFile {
             Liveness::Alive { exe, started } => (exe.clone(), *started),
             // It exited at once; the supervisor reports why.
             Liveness::Gone => {
-                debug!(pid, "php-fpm exited before its pid file was written");
+                debug!(pid, path = %self.path.display(), "it exited before its pid file was written");
                 return Recorded::Never;
             }
             Liveness::Unknown => {
-                debug!(pid, "cannot tell yet who runs under the pid of php-fpm");
+                debug!(pid, path = %self.path.display(), "cannot tell yet who runs under the pid");
                 return Recorded::NotYet(now);
             }
         };
         if started.is_some_and(|then| then != now_started) {
-            warn!(pid, "php-fpm pid file not written: the pid changed hands");
+            warn!(pid, path = %self.path.display(), "pid file not written: the pid changed hands");
             return Recorded::Never;
         }
         if !accepted([program.to_path_buf()]).contains(&exe) {
             if own_executable().contains(&exe) {
-                debug!(pid, "the exec of php-fpm is not done yet");
+                debug!(pid, path = %self.path.display(), "the exec of the program is not done yet");
                 return Recorded::NotYet(now);
             }
             let exe = exe.display();
-            warn!(pid, %exe, "php-fpm pid file not written: the pid runs another program");
+            warn!(pid, %exe, path = %self.path.display(), "pid file not written: the pid runs another program");
             return Recorded::Never;
         }
         // Our program, and our own child: not a process of the same program
@@ -141,15 +141,13 @@ impl PidFile {
             Some(_) => {
                 warn!(
                     pid,
-                    "php-fpm pid file not written: the process list gives another start time"
+                    path = %self.path.display(),
+                    "pid file not written: the process list gives another start time"
                 );
                 return Recorded::Never;
             }
             None => {
-                warn!(
-                    pid,
-                    "php-fpm pid file not written: not a child of the daemon"
-                );
+                warn!(pid, "pid file not written: not a child of the daemon");
                 return Recorded::Never;
             }
         }
@@ -160,11 +158,11 @@ impl PidFile {
         };
         match process::write_pid_file(&self.path, &record) {
             Ok(()) => {
-                debug!(pid, path = %self.path.display(), "php-fpm pid file written");
+                debug!(pid, path = %self.path.display(), "pid file written");
                 Recorded::Written(record)
             }
             Err(err) => {
-                warn!(%err, path = %self.path.display(), "cannot write the php-fpm pid file");
+                warn!(%err, path = %self.path.display(), "cannot write the pid file");
                 Recorded::Never
             }
         }
@@ -173,7 +171,7 @@ impl PidFile {
     /// After php-fpm exited: its pid may belong to anyone from now on.
     pub fn remove(&self) {
         if let Err(err) = process::remove_pid_file(&self.path) {
-            warn!(%err, path = %self.path.display(), "cannot delete the php-fpm pid file");
+            warn!(%err, path = %self.path.display(), "cannot delete the pid file");
         }
     }
 
@@ -184,7 +182,7 @@ impl PidFile {
             warn!(
                 pid = record.pid,
                 path = %self.path.display(),
-                "orphan recovery is off on this system; deleting the php-fpm pid file, no signal"
+                "orphan recovery is off on this system; deleting the pid file, no signal"
             );
         }
         self.remove();

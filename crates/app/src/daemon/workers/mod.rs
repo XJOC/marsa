@@ -28,7 +28,7 @@ use marsa_core::codes;
 use marsa_core::data_dir::DataDir;
 use marsa_core::php::PhpFiles;
 use marsa_core::recipes::Platform;
-use marsa_core::services::{RestartPolicy, ServiceSpec};
+use marsa_core::services::{RestartPolicy, ServiceSpec, StopMethod};
 use marsa_core::sites::{Site, SiteKind};
 use marsa_core::types::{ServiceId, ServiceState, ServiceStatus, SiteKey, WorkerKind};
 use marsa_core::workers::{self, WorkerPaths, worker_spec};
@@ -37,11 +37,11 @@ use tracing::{info, warn};
 use crate::daemon::services::php;
 use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
 use crate::daemon::services::supervisor::{ServiceRuntime, Supervisor, lock};
-
-mod orphan;
+use crate::daemon::state::Daemon;
 
 use self::orphan::Before;
-use crate::daemon::state::Daemon;
+
+mod orphan;
 
 /// The statuses and recent lines of the workers that are wanted now, for
 /// the routes, and the restarts the routes asked for.
@@ -93,6 +93,13 @@ impl Workers {
     /// ran out. The route then asks for a pass.
     pub fn ask_restart(&self, id: ServiceId) {
         lock(&self.restarts).insert(id);
+    }
+
+    /// Whether worker `id` is `Failed`, kept from starting by its old run.
+    fn failed_stuck(&self, id: ServiceId) -> bool {
+        self.find(id).is_some_and(|runtime| {
+            matches!(&lock(&runtime).status.state, ServiceState::Failed { code } if code == orphan::STUCK)
+        })
     }
 
     fn take_restarts(&self) -> BTreeSet<ServiceId> {
@@ -224,6 +231,9 @@ pub struct WorkerManager {
     restart: RestartPolicy,
     /// Who runs under a pid, and signals, for the orphan check.
     probes: Arc<dyn ProcessProbe>,
+    /// The records of workers no longer wanted were looked at, once, at the
+    /// first pass: an orphan of a site turned off while no daemon ran.
+    swept: bool,
 }
 
 impl WorkerManager {
@@ -234,6 +244,7 @@ impl WorkerManager {
             running: BTreeMap::new(),
             restart: workers::RESTART,
             probes: Arc::new(SystemProbe),
+            swept: false,
         }
     }
 
@@ -247,9 +258,17 @@ impl WorkerManager {
         let data_dir = self.data_dir.clone();
         let platform = self.platform;
         let list = sites.to_vec();
-        let job = move || wanted(&data_dir, platform, &list);
-        let wanted = match tokio::task::spawn_blocking(job).await {
-            Ok(wanted) => wanted,
+        let sweep = !self.swept;
+        let job = move || {
+            let records = if sweep {
+                orphan::recorded_workers(&data_dir)
+            } else {
+                Vec::new()
+            };
+            (wanted(&data_dir, platform, &list), records)
+        };
+        let (wanted, records) = match tokio::task::spawn_blocking(job).await {
+            Ok(found) => found,
             Err(err) => {
                 // Nothing is stopped for a job that failed.
                 warn!(error = %err, "the workers job failed");
@@ -299,26 +318,70 @@ impl WorkerManager {
         if daemon.shutdown().is_cancelled() {
             return;
         }
-        for (id, plan) in start {
-            if self.start(daemon, plan).await {
+        // Each orphan check at once: each may wait for an old job to end.
+        let mut checks = Vec::new();
+        for (id, plan) in &start {
+            checks.push((*id, self.check(*id, plan.spec.stop.clone())));
+        }
+        self.swept = true;
+        let swept: Vec<ServiceId> = records
+            .into_iter()
+            .filter(|id| !wanted.contains_key(id))
+            .collect();
+        let swept: Vec<_> = swept
+            .into_iter()
+            .filter_map(|id| match id {
+                ServiceId::Worker(kind, _) => {
+                    Some((id, self.check(id, workers::stop_method(kind))))
+                }
+                _ => None,
+            })
+            .collect();
+        for (id, check) in swept {
+            match check.await {
+                Ok(Before::Clear) => {}
+                Ok(Before::Note(text)) => info!(service = %id, "{text}"),
+                Ok(Before::Stuck(text)) => warn!(service = %id, "{text}"),
+                Err(err) => warn!(service = %id, error = %err, "the orphan check failed"),
+            }
+        }
+        for ((id, plan), (_, check)) in start.into_iter().zip(checks) {
+            let before = check.await;
+            // A worker kept from starting by its old run is not tried again
+            // at each pass, which would wait for it each time: `restart`
+            // tries again.
+            if self.start(daemon, plan, before) || daemon.workers().failed_stuck(id) {
                 self.running.insert(id, plan.clone());
             }
         }
     }
 
-    /// Starts the worker under the supervisor, after the orphan check.
-    /// `false` if it cannot start: its status then says why.
-    async fn start(&self, daemon: &Daemon, plan: &Plan) -> bool {
+    /// The orphan check of worker `id`, in a task of its own, so the checks
+    /// of a pass run at once.
+    fn check(&self, id: ServiceId, stop: StopMethod) -> tokio::task::JoinHandle<Before> {
+        let probes = Arc::clone(&self.probes);
+        let data_dir = self.data_dir.clone();
+        let platform = self.platform;
+        tokio::spawn(async move { orphan::clear(&*probes, &data_dir, platform, id, &stop).await })
+    }
+
+    /// Starts the worker under the supervisor, after its orphan check
+    /// (`before`). `false` if it cannot start: its status then says why.
+    fn start(
+        &self,
+        daemon: &Daemon,
+        plan: &Plan,
+        before: Result<Before, tokio::task::JoinError>,
+    ) -> bool {
         let id = plan.spec.id;
         let runtime = daemon.workers().runtime(id);
-        let before = orphan::clear(
-            &*self.probes,
-            &self.data_dir,
-            self.platform,
-            id,
-            &plan.spec.stop,
-        );
-        match before.await {
+        // A check that failed may have left our old worker running: two
+        // would take the same jobs.
+        let before = before.unwrap_or_else(|err| {
+            warn!(service = %id, error = %err, "the orphan check of the worker failed");
+            Before::Stuck("marsad: the check for an old run of this worker failed.".to_owned())
+        });
+        match before {
             Before::Clear => {}
             Before::Note(text) => lock(&runtime).note(daemon.events(), &text),
             Before::Stuck(text) => {

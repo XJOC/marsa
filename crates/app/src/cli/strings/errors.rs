@@ -289,7 +289,7 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
         ),
         "worker_orphan_stuck" => format!(
             "{id} did not start: the one that an earlier marsad left running did not stop, and \
-             two would take the same jobs. Run \"marsa logs {id}\" to see its pid, end that \
+             two would take the same jobs or run the same tasks. Run \"marsa logs {id}\" to see its pid, end that \
              process, then run \"marsa services restart {id}\"."
         ),
         "worker_follows_site" => format!(

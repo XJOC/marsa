@@ -40,7 +40,7 @@ use tokio::sync::broadcast;
 use crate::daemon::services::php::orphan::{PidFile, installed_programs, watch};
 use crate::daemon::services::pid_record::{self, Cleared, Owner, Stuck};
 use crate::daemon::services::probe::ProcessProbe;
-use crate::daemon::services::supervisor::ServiceHandle;
+use crate::daemon::services::supervisor::{ServiceHandle, lock};
 
 /// `run/<id>.pid` of `data_dir`: `run/queue-shop.pid`. Always one file in
 /// `run/`: a worker's id holds a valid site name only.
@@ -70,10 +70,26 @@ pub(super) async fn clear(
     let Some(platform) = platform else {
         return Before::Clear;
     };
+    if !process::WORKER_ORPHAN_RECOVERY {
+        return Before::Clear;
+    }
+    let path = pid_path(data_dir, id);
+    // A child of this daemon is one of its own workers, never an orphan:
+    // after a reboot on Linux, where start times count from the boot, an
+    // old record of another worker could name it.
+    if let Some(record) = process::read_pid_file(&path)
+        && probes
+            .children(std::process::id())
+            .await
+            .is_some_and(|children| children.iter().any(|child| child.pid == record.pid))
+    {
+        pid_record::remove(&path, id);
+        return Before::Clear;
+    }
     let owner = Owner {
         id,
         name: "worker",
-        pid_file: pid_path(data_dir, id),
+        pid_file: path,
         port: None,
         recovery: process::WORKER_ORPHAN_RECOVERY,
     };
@@ -85,7 +101,8 @@ pub(super) async fn clear(
         Ok(Cleared::Unknown { pid }) => Before::Note(format!(
             "marsad: run/{id}.pid names pid {pid}, and the system cannot tell whether it is \
              still the worker that an earlier marsad left running, so it got no signal; if it \
-             still runs, two workers take this site's jobs until it ends."
+             still runs, two workers take this site's jobs, or run its tasks twice, until it \
+             ends."
         )),
         Err(Stuck(reason)) => Before::Stuck(format!("marsad: {reason}.")),
     }
@@ -96,6 +113,22 @@ fn stopped_line(id: ServiceId, pid: u32, signal: Option<Signal>) -> String {
         format!("it ended after {}", signal.name())
     });
     format!("marsad: stopped the {id} (pid {pid}) that an earlier marsad left running; {how}.")
+}
+
+/// The workers with a record in `run/` (`run/queue-shop.pid`). A name that
+/// is no worker's id is left out.
+pub(super) fn recorded_workers(data_dir: &Path) -> Vec<ServiceId> {
+    let Ok(entries) = std::fs::read_dir(DataDir::new(data_dir).run()) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let id: ServiceId = name.strip_suffix(".pid")?.parse().ok()?;
+            id.is_worker().then_some(id)
+        })
+        .collect()
 }
 
 /// The code of a worker that [`Before::Stuck`] keeps from starting.
@@ -114,9 +147,7 @@ pub(super) fn record(
     if !process::WORKER_ORPHAN_RECOVERY {
         return handle;
     }
-    let id = crate::daemon::services::supervisor::lock(&handle.runtime)
-        .status
-        .id;
+    let id = lock(&handle.runtime).status.id;
     let pid_file = PidFile {
         path: pid_path(data_dir, id),
     };
@@ -132,13 +163,12 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use marsa_core::orphan::{Liveness, PidRecord};
+    use marsa_core::orphan::{ChildProcess, Liveness, PidRecord};
     use marsa_core::ps::StartTime;
     use marsa_core::types::{SiteKey, WorkerKind};
     use tempfile::TempDir;
 
     use crate::daemon::services::probe::BoxFuture;
-    use crate::daemon::services::supervisor::lock;
 
     const PID: u32 = 4242;
 
@@ -148,6 +178,8 @@ mod tests {
         looks: Mutex<Vec<Liveness>>,
         last: Liveness,
         signals: Mutex<Vec<(u32, Signal)>>,
+        /// The children of this daemon.
+        children: Vec<u32>,
     }
 
     impl Fake {
@@ -156,6 +188,7 @@ mod tests {
                 looks: Mutex::new(looks),
                 last,
                 signals: Mutex::new(Vec::new()),
+                children: Vec::new(),
             }
         }
 
@@ -173,6 +206,16 @@ mod tests {
                 looks.remove(0)
             };
             Box::pin(std::future::ready(now))
+        }
+
+        fn children(&self, _ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>> {
+            let child = |pid: &u32| ChildProcess {
+                pid: *pid,
+                started: StartTime::Ticks(7),
+            };
+            Box::pin(std::future::ready(Some(
+                self.children.iter().map(child).collect(),
+            )))
         }
 
         fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, std::io::Result<()>> {
@@ -237,6 +280,7 @@ mod tests {
             alive(Path::new("/usr/bin/vim"), 7),
             // Our php, but started at another time: the pid changed hands.
             alive(&php, 8),
+            alive(&php, 6),
             // The php of another data folder.
             alive(&elsewhere, 7),
             Liveness::Gone,
@@ -291,14 +335,78 @@ mod tests {
         assert_eq!(fake.signals(), [(PID, Signal::Term), (PID, Signal::Kill)]);
     }
 
-    /// A real orphan: a copy of `sleep` stands for our PHP, started outside
-    /// any supervisor, as a crashed daemon leaves it.
+    /// The record and the process agree, but the program is not the PHP CLI
+    /// of an installed version of this data folder: not ours.
+    #[tokio::test]
+    async fn only_the_php_of_this_data_folder_is_ours() {
+        let (temp, _) = data();
+        let other_data = TempDir::new().unwrap();
+        let not_ours = [
+            other_data.path().join("runtimes/php/8.4.1/bin/php"),
+            temp.path().join("runtimes/php/8.4.1/bin/php-fpm"),
+            temp.path().join("runtimes/php/8.3.0/bin/php"),
+        ];
+        for exe in not_ours {
+            recorded(temp.path(), &exe);
+            let fake = Fake::says(Vec::new(), alive(&exe, 7));
+            assert_eq!(run(&fake, temp.path()).await, Before::Clear, "{exe:?}");
+            assert!(fake.signals().is_empty(), "{exe:?}");
+            assert!(!pid_path(temp.path(), queue()).exists(), "{exe:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_of_this_daemon_is_never_an_orphan() {
+        let (temp, php) = data();
+        recorded(temp.path(), &php);
+        let mut fake = Fake::says(Vec::new(), alive(&php, 7));
+        fake.children = vec![PID];
+        assert_eq!(run(&fake, temp.path()).await, Before::Clear);
+        assert!(fake.signals().is_empty());
+        assert!(!pid_path(temp.path(), queue()).exists());
+    }
+
+    /// Kills the process at the end of a test, whatever happened.
+    struct KillOnDrop(u32);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", &self.0.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+
+    /// A real orphan: `sleep` stands for our PHP, started outside any
+    /// supervisor, as a crashed daemon leaves it. Our `php` is a link to it:
+    /// macOS kills a copy of a system program, and the check follows the
+    /// link (`accepted`).
     #[tokio::test]
     async fn a_real_orphan_is_stopped_and_gone() {
-        let (temp, php) = data();
-        std::fs::copy("/bin/sleep", &php).unwrap();
-        let mut orphan = std::process::Command::new(&php).arg("600").spawn().unwrap();
-        let pid = orphan.id();
+        let (temp, _) = data();
+        let link = temp.path().join("runtimes/php/8.4.1/bin/php");
+        std::fs::remove_file(&link).unwrap();
+        let sleep = ["/bin/sleep", "/usr/bin/sleep"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.exists())
+            .unwrap();
+        std::os::unix::fs::symlink(sleep, &link).unwrap();
+        let php = std::fs::canonicalize(&link).unwrap();
+        // Started by a shell that ends at once, so the orphan's parent is not
+        // this process, which stands for the daemon.
+        let started = std::process::Command::new("/bin/sh")
+            .args(["-c", "\"$0\" 600 >/dev/null 2>&1 & echo $!"])
+            .arg(&link)
+            .output()
+            .unwrap();
+        let pid: u32 = String::from_utf8(started.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let _kill = KillOnDrop(pid);
         let identity = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Liveness::Alive { exe, started } = process::real_identity(pid).await
@@ -321,8 +429,7 @@ mod tests {
             panic!("a note: {before:?}");
         };
         assert!(text.contains(&format!("(pid {pid})")), "{text}");
-        let status = orphan.wait().unwrap();
-        assert!(!status.success());
+        assert_eq!(process::real_identity(pid).await, Liveness::Gone);
         assert!(!pid_path(temp.path(), queue()).exists());
     }
 }

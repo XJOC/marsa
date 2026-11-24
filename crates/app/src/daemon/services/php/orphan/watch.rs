@@ -203,7 +203,7 @@ impl Recording {
                     warn!(
                         pid,
                         ?now,
-                        "php-fpm pid file not written: the pid is not verified as our php-fpm"
+                        "pid file not written: the pid is not verified as our program"
                     );
                     FileState::Never
                 }
@@ -235,6 +235,6 @@ impl Recording {
 
 fn report(id: ServiceId, result: Result<(), tokio::task::JoinError>) {
     if let Err(err) = result {
-        warn!(service = %id, %err, "the php-fpm supervisor task failed");
+        warn!(service = %id, %err, "the supervisor task failed");
     }
 }
