@@ -7,6 +7,7 @@
 
 mod errors;
 mod home;
+mod mail;
 mod runtimes;
 mod services;
 mod setup;
@@ -18,6 +19,7 @@ pub(crate) mod tests;
 
 pub use errors::*;
 pub use home::*;
+pub use mail::*;
 pub use runtimes::*;
 pub use services::*;
 pub use setup::*;

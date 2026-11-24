@@ -117,6 +117,7 @@ impl App {
                 }
             }
             Effect::PickFolder(pick) => self.open_picker(ctx, pick),
+            Effect::OpenUrl(url) => open_url(ctx, &url),
         }
     }
 
@@ -285,6 +286,15 @@ pub(crate) fn open_site(ctx: &egui::Context, model: &Model, name: &str) {
     };
     if ReviewAids::is_demo() {
         tracing::info!(%url, "demo: a site would open in the browser");
+        return;
+    }
+    ctx.open_url(egui::OpenUrl::new_tab(url));
+}
+
+/// Opens a page of Mailpit's in the browser, as [`open_site`] does a site.
+fn open_url(ctx: &egui::Context, url: &str) {
+    if ReviewAids::is_demo() {
+        tracing::info!(%url, "demo: a page would open in the browser");
         return;
     }
     ctx.open_url(egui::OpenUrl::new_tab(url));
