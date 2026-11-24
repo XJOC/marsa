@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtimes::Runtime;
 
-use super::{InstallEvent, ServiceStatus, SetupReport, UninstallReport, Uninstalled};
+use super::{DbQueryDone, InstallEvent, ServiceStatus, SetupReport, UninstallReport, Uninstalled};
 
 /// The answer to every `POST /v1/jobs/...` (ADR 0026): `202` at once, then
 /// `job` events with the same `id` on `/v1/events`, and `GET /v1/jobs/{id}`.
@@ -26,6 +26,8 @@ pub enum JobKind {
     HostsSync,
     ServiceAction,
     RuntimeUninstall,
+    /// A SQL statement of the database browser's user (ADR 0028).
+    DbQuery,
     /// A kind a newer daemon knows. An older client still follows the job to
     /// its end by id.
     #[serde(other)]
@@ -53,6 +55,10 @@ pub enum JobOutcome {
     HostsSync(SetupReport),
     ServiceAction(ServiceStatus),
     RuntimeUninstall(Uninstalled),
+    /// A summary only: the rows wait in the daemon for
+    /// `GET /v1/db/results/{id}`, because every reader of the stream gets
+    /// this event.
+    DbQuery(DbQueryDone),
 }
 
 /// The `status` of a [`JobEvent`]. The last one of a job is `done` or
@@ -79,6 +85,10 @@ pub struct JobFailure {
     /// not send it: the client then reads 500.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
+    /// What a database server said, for a `db_query` job only. Shown as
+    /// data; never in `message`, which may be logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// `Event::Job`, and the answer of `GET /v1/jobs/{id}`: what job `id` did

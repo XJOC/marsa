@@ -8,6 +8,8 @@
 //! | `POST /v1/db/table` | `DbTable`: the columns of a table |
 //! | `POST /v1/db/rows` | `DbPage`: 500 rows after `offset`, in the key's order |
 //! | `POST /v1/db/cell` | `DbValue`: one whole value, up to 64 KiB, by the row's key |
+//! | `POST /v1/jobs/db/query` | `202 JobAccepted`: one statement of the user's runs as a job ([`query`]) |
+//! | `GET /v1/db/results/{id}` | `DbResult`: the rows of a finished statement, once |
 //! | `POST /v1/db/close` | `204`: every browser connection closes |
 //!
 //! | Error | When |
@@ -18,6 +20,9 @@
 //! | 404 `db_not_found` | the server has no such database, or it is one of the server's own |
 //! | 404 `db_table_not_found` | the catalog does not list the table |
 //! | 404 `db_row_not_found` | no row has the key, or the table has no key |
+//! | 404 `db_result_gone` | the rows were read already, kept too long, or closed |
+//! | 400 `db_one_statement`, `db_sql_too_long` | the text is not one statement of at most 256 KiB |
+//! | 409 `db_busy` | a statement of the user's runs on that source already |
 //! | 400 `db_source_invalid` | the sort column is not the table's, or a name cannot be quoted |
 //! | 404 `db_file_not_found` | the site has no SQLite file; none is made |
 //! | 403 `db_file_outside_site` | the file is not a regular file inside the site's folder |
@@ -31,6 +36,7 @@
 //! database said: those go to the client that asked, and only there.
 
 mod catalog;
+mod query;
 mod rows;
 mod servers;
 mod sqlite;
@@ -40,16 +46,17 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa_core::codes;
 use marsa_core::databases::ServerKind;
 use marsa_core::types::{
-    DbCellRequest, DbDatabase, DbPage, DbRowsRequest, DbServer, DbServerInfo, DbSource, DbSources,
-    DbTable, DbTableRequest, DbTables, DbTablesRequest, DbValue,
+    DbCellRequest, DbDatabase, DbPage, DbQueryRequest, DbResult, DbRowsRequest, DbServer,
+    DbServerInfo, DbSource, DbSources, DbTable, DbTableRequest, DbTables, DbTablesRequest, DbValue,
+    JobAccepted, JobKind, JobOutcome,
 };
 use tracing::info;
 
@@ -73,6 +80,7 @@ const IDLE: Duration = Duration::from_secs(60);
 /// `marsad` holds nothing of it. SQLite files are never kept open.
 pub(crate) struct Browser {
     store: Arc<store::Store<servers::Conn>>,
+    queries: query::Queries,
 }
 
 /// Says nothing of what it holds: a connection is not for logs.
@@ -86,6 +94,7 @@ impl Default for Browser {
     fn default() -> Self {
         Self {
             store: Arc::new(store::Store::new(IDLE)),
+            queries: query::Queries::default(),
         }
     }
 }
@@ -121,6 +130,8 @@ pub fn routes() -> Router<Arc<Daemon>> {
         .route("/v1/db/table", post(table))
         .route("/v1/db/rows", post(rows))
         .route("/v1/db/cell", post(cell))
+        .route("/v1/jobs/db/query", post(start_query))
+        .route("/v1/db/results/{id}", get(result))
         .route("/v1/db/close", post(close))
 }
 
@@ -297,6 +308,73 @@ async fn cell(
     Ok(Json(value))
 }
 
+/// Starts one statement of the user's as a job. The source is checked first,
+/// so a missing site or database answers this request, not the job.
+async fn start_query(
+    State(daemon): State<Arc<Daemon>>,
+    body: Result<Json<DbQueryRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<JobAccepted>), HttpError> {
+    let Json(DbQueryRequest { source, sql }) =
+        body.map_err(|err| err.reject(codes::INVALID_BODY))?;
+    let statement = query::one_statement(source.engine(), &sql)?;
+    let target = match &source {
+        DbSource::SiteFile { site } => query::Target::File(sqlite::site_file(&daemon, site).await?),
+        DbSource::Server { server, database } => {
+            let database = within(listed_database(&daemon, *server, database)).await?;
+            query::Target::Server(*server, database)
+        }
+    };
+    daemon.db_browser().queries.reserve(&source)?;
+    let busy = query::Busy {
+        daemon: Arc::clone(&daemon),
+        source: source.clone(),
+    };
+    let (id_sent, id) = tokio::sync::oneshot::channel::<u64>();
+    let work = {
+        let daemon = Arc::clone(&daemon);
+        let source = source.clone();
+        async move {
+            let _busy = busy;
+            let started = Instant::now();
+            let id = id
+                .await
+                .map_err(|_| unavailable("the job has no id".to_owned()))?;
+            let (result, done) = query::run(&daemon, target, statement).await?;
+            log(&source, "query", started, result.rows.len());
+            daemon.db_browser().queries.keep(id, result);
+            Ok(done)
+        }
+    };
+    let (id, _ended) = crate::daemon::jobs::start(
+        &daemon,
+        JobKind::DbQuery,
+        "db query",
+        JobOutcome::DbQuery,
+        work,
+        |_, _| {},
+    );
+    let _ = id_sent.send(id);
+    Ok((StatusCode::ACCEPTED, Json(JobAccepted { id })))
+}
+
+/// The rows of a finished statement, once.
+async fn result(
+    State(daemon): State<Arc<Daemon>>,
+    Path(id): Path<u64>,
+) -> Result<Json<DbResult>, HttpError> {
+    daemon
+        .open_db_browser()
+        .and_then(|browser| browser.queries.take(id))
+        .map(Json)
+        .ok_or_else(|| {
+            HttpError::new(
+                StatusCode::NOT_FOUND,
+                codes::DB_RESULT_GONE,
+                "no rows are kept for that statement",
+            )
+        })
+}
+
 /// `database`, if the server's catalog lists it. A system database is never
 /// listed, so it is never opened.
 async fn listed_database(
@@ -322,6 +400,7 @@ async fn listed_database(
 async fn close(State(daemon): State<Arc<Daemon>>) -> StatusCode {
     if let Some(browser) = daemon.open_db_browser() {
         browser.close_all();
+        browser.queries.drop_results();
     }
     info!(request = "close", "database browser");
     StatusCode::NO_CONTENT
@@ -374,5 +453,7 @@ fn unavailable(said: String) -> HttpError {
     err
 }
 
+#[cfg(test)]
+mod query_tests;
 #[cfg(test)]
 mod tests;

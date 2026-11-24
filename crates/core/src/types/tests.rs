@@ -441,6 +441,7 @@ fn job_events_are_flat_objects_in_a_job_event() {
             code: "internal_error".into(),
             message: "the setup job failed".into(),
             http_status: Some(500),
+            detail: None,
         })),
         json!({
             "type": "job",
@@ -457,6 +458,7 @@ fn job_events_are_flat_objects_in_a_job_event() {
             code: "x".into(),
             message: "y".into(),
             http_status: None,
+            detail: None,
         })),
         json!({
             "type": "job",
@@ -499,6 +501,7 @@ fn job_events_are_flat_objects_in_a_job_event() {
                 code: "service_busy".into(),
                 message: "another action runs".into(),
                 http_status: Some(409),
+                detail: None,
             }),
         }),
         json!({

@@ -183,11 +183,26 @@ impl DaemonClient {
         segments: &[&str],
         lost: &'static str,
     ) -> Result<JobOutcome, ClientError> {
+        self.run_job_with::<()>(segments, None, lost)
+            .await
+            .map(|(_, outcome)| outcome)
+    }
+
+    /// [`Self::run_job`] with a JSON `body`, if any; also the job's id.
+    pub(super) async fn run_job_with<B: serde::Serialize>(
+        &self,
+        segments: &[&str],
+        body: Option<&B>,
+        lost: &'static str,
+    ) -> Result<(u64, JobOutcome), ClientError> {
         // An id that cannot be a path segment is refused before any request.
         self.url(segments)?;
         // Open before the start, so no event of this job is missed.
         let mut stream = self.events().await?;
-        let accepted: JobAccepted = self.call(Method::POST, segments).await?;
+        let accepted: JobAccepted = match body {
+            Some(body) => self.call_with(Method::POST, segments, body).await?,
+            None => self.call(Method::POST, segments).await?,
+        };
         let id = accepted.id;
         let mut resyncs = 0;
         loop {
@@ -195,7 +210,7 @@ impl DaemonClient {
                 Some(Ok(StreamItem::Item(Event::Job(event)))) if event.id == id => {
                     resyncs = 0;
                     if let Some(end) = ended(event) {
-                        return end;
+                        return end.map(|outcome| (id, outcome));
                     }
                 }
                 // The daemon is stopping, and the job stops with it.
@@ -208,7 +223,7 @@ impl DaemonClient {
                 Some(Err(ClientError::BadResponse { .. })) => match self.job(id).await {
                     Ok(event) => {
                         if let Some(end) = ended(event) {
-                            return end;
+                            return end.map(|outcome| (id, outcome));
                         }
                     }
                     Err(err @ ClientError::BadResponse { .. }) => return Err(err),
@@ -237,7 +252,7 @@ impl DaemonClient {
                     match self.job(id).await {
                         Ok(event) => {
                             if let Some(end) = ended(event) {
-                                return end;
+                                return end.map(|outcome| (id, outcome));
                             }
                         }
                         // The daemon restarted with the same token: the
@@ -257,7 +272,8 @@ fn ended(event: JobEvent) -> Option<Result<JobOutcome, ClientError>> {
         JobUpdate::Running { .. } => None,
         JobUpdate::Done(outcome) => Some(Ok(outcome)),
         JobUpdate::Failed(failure) => {
-            let body = ErrorBody::new(failure.code, failure.message);
+            let mut body = ErrorBody::new(failure.code, failure.message);
+            body.detail = failure.detail;
             Some(Err(ClientError::api(
                 failure.http_status.unwrap_or(500),
                 &body,

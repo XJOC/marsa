@@ -9,6 +9,8 @@ use crate::types::{API_VERSION, ErrorBody, VersionInUse};
 
 /// The longest text from the daemon kept in an error or a log line.
 const MAX_DAEMON_TEXT: usize = 200;
+/// The longest message of a database server kept for the user to read.
+const MAX_DETAIL: usize = 4096;
 
 /// Why a call to the daemon failed. [`ClientError::code`] gives a stable name
 /// that the UI maps to a message. No message holds the token: the token lives
@@ -72,6 +74,18 @@ pub enum ClientError {
         message: String,
     },
 
+    /// The daemon's error with what a database server said (the database
+    /// browser, ADR 0028). `detail` is that server's text, for the user to
+    /// read as data: it is not in this error's `Display`, which may be
+    /// logged.
+    #[error("the daemon answered {status} {code}: {message}")]
+    Database {
+        status: u16,
+        code: String,
+        message: String,
+        detail: String,
+    },
+
     /// The daemon's 409 `version_in_use` or
     /// `sites_lose_php` from `DELETE
     /// /v1/runtimes/{tool}/{version}`, with what uses the version. Its text
@@ -101,7 +115,7 @@ impl ClientError {
             ClientError::BadResponse { .. } => crate::codes::DAEMON_BAD_RESPONSE,
             ClientError::InvalidId { .. } => crate::codes::INVALID_ID,
             ClientError::PathNotUtf8 { .. } => crate::codes::SITE_PATH_NOT_UTF8,
-            ClientError::Api { code, .. } => code,
+            ClientError::Api { code, .. } | ClientError::Database { code, .. } => code,
             ClientError::InUse { in_use, .. } => in_use.code(),
             ClientError::DaemonFile(err) => err.code(),
         }
@@ -152,10 +166,26 @@ impl ClientError {
                 }),
             };
         }
+        if let Some(detail) = &body.detail {
+            return ClientError::Database {
+                status,
+                code: daemon_text(&body.error.code),
+                message: daemon_text(&body.error.message),
+                detail: detail_text(detail),
+            };
+        }
         ClientError::Api {
             status,
             code: daemon_text(&body.error.code),
             message: daemon_text(&body.error.message),
+        }
+    }
+
+    /// What a database server said, for the codes of the database browser.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            ClientError::Database { detail, .. } => Some(detail),
+            _ => None,
         }
     }
 
@@ -206,9 +236,46 @@ pub(super) fn daemon_text(text: &str) -> String {
         .collect()
 }
 
+/// A server's message, kept for the user: line breaks and tabs stay (it may
+/// point at a line of the statement), other control characters go, and it
+/// is cut at [`MAX_DETAIL`] characters.
+fn detail_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .take(MAX_DETAIL)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_servers_message_stays_readable_and_bounded() {
+        let body = ErrorBody {
+            detail: Some("syntax error at or near \"FORM\"\nLINE 1: \u{1b}[31mSELECT".into()),
+            ..ErrorBody::new("db_query_failed", "the database did not run the statement")
+        };
+        let err = ClientError::api(400, &body);
+        assert_eq!(err.code(), "db_query_failed");
+        assert_eq!(
+            err.detail(),
+            Some("syntax error at or near \"FORM\"\nLINE 1: [31mSELECT")
+        );
+        assert!(!err.to_string().contains("FORM"), "{err}");
+        let long = ErrorBody {
+            detail: Some("x".repeat(10_000)),
+            ..ErrorBody::new("db_query_failed", "m")
+        };
+        assert_eq!(
+            ClientError::api(400, &long).detail().unwrap().len(),
+            MAX_DETAIL
+        );
+        assert_eq!(
+            ClientError::api(400, &ErrorBody::new("x", "m")).detail(),
+            None
+        );
+    }
 
     #[test]
     fn daemon_text_drops_control_characters_and_is_short() {

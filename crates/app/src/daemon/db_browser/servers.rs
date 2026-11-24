@@ -86,6 +86,25 @@ pub(super) async fn with<T>(
     result
 }
 
+/// A connection of its own for one statement of the user's: read-only like
+/// the others, but with the user's limit instead of the browser's.
+pub(super) async fn query_connection(
+    daemon: &Daemon,
+    server: DbServer,
+    database: &str,
+    limit: std::time::Duration,
+) -> Result<Conn, HttpError> {
+    let port = port(daemon, server)?;
+    let mut conn = connect(server, port, Some(database)).await?;
+    let ms = limit.as_millis();
+    let set = match server {
+        DbServer::Mysql => format!("SET SESSION max_execution_time = {ms}"),
+        DbServer::Postgres => format!("SET statement_timeout = {ms}"),
+    };
+    run(&mut conn, set).await?;
+    Ok(conn)
+}
+
 /// The port of the server this daemon runs, once it took connections.
 fn port(daemon: &Daemon, server: DbServer) -> Result<u16, HttpError> {
     if daemon.shutdown().is_cancelled() {

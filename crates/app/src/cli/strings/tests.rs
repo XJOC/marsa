@@ -48,6 +48,12 @@ fn every_client_error_has_a_message() {
             code: "caddy_not_installed".into(),
             message: "x".into(),
         },
+        ClientError::Database {
+            status: 400,
+            code: "db_query_failed".into(),
+            message: "x".into(),
+            detail: "syntax error".into(),
+        },
         ClientError::InUse {
             message: "x".into(),
             in_use: Box::default(),
@@ -88,6 +94,7 @@ fn every_client_error_has_a_message() {
             | ClientError::InvalidId { .. }
             | ClientError::PathNotUtf8 { .. }
             | ClientError::Api { .. }
+            | ClientError::Database { .. }
             | ClientError::InUse { .. }
             | ClientError::DaemonFile(_) => {}
         }
