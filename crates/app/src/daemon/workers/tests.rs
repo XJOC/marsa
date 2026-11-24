@@ -1,7 +1,4 @@
 use super::*;
-use std::time::Duration;
-
-use tempfile::TempDir;
 
 fn site(root: &Path, kind: SiteKind, php: Option<&str>, queue: bool, schedule: bool) -> Site {
     Site {
@@ -97,8 +94,11 @@ fn a_site_without_php_or_a_system_without_builds_cannot_run_a_worker() {
 #[cfg(unix)]
 mod real {
     use super::*;
+    use std::time::Duration;
+
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
     use marsa_core::services::RestartPolicy;
 
