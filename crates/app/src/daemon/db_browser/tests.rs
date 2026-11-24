@@ -177,6 +177,9 @@ async fn a_wal_database_keeps_its_bytes_and_gets_only_its_sidecars() {
     // The app closed its last connection, which removed its WAL files.
     assert_eq!(listing(folder), ["database.sqlite"]);
     let before = fs::read(&file).unwrap();
+    // Bytes 18 and 19 of the header are 2 in WAL mode: the test is not a
+    // copy of the rollback-journal one.
+    assert_eq!(before[18..20], [2, 2]);
 
     let (status, json) = app.tables(blog()).await;
     assert_eq!(status, StatusCode::OK, "{json}");
@@ -219,7 +222,10 @@ async fn a_missing_file_is_not_made() {
     let relative = sqlite::open(Path::new("database.sqlite"))
         .await
         .unwrap_err();
-    assert_eq!(relative.code, "db_unavailable");
+    assert_eq!(
+        relative.detail.as_deref(),
+        Some("the SQLite path is not absolute")
+    );
 }
 
 #[tokio::test]
