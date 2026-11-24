@@ -355,14 +355,15 @@ pub(super) fn unknown_line(kind: ServerKind, pid: u32) -> String {
     )
 }
 
+// Only where the daemon writes records at all (`DATABASE_ORPHAN_RECOVERY`):
+// elsewhere `record` writes none.
 #[cfg(test)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod tests {
     use super::*;
 
     /// Each way [`record`] ends, against a fake that answers each look from
-    /// a script. Only where the daemon writes records at all
-    /// (`DATABASE_ORPHAN_RECOVERY`): elsewhere `record` writes none.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    /// a script.
     mod record {
         use std::collections::VecDeque;
         use std::io;
