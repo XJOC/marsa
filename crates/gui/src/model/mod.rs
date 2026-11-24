@@ -717,6 +717,8 @@ pub fn apply(model: &mut Model, event: Event) {
         // The bridge follows the jobs it starts (`client::run_setup`); the
         // model learns each end from `setup_finished` and the like.
         Event::Job(_) => {}
+        // The Dumps screen asks for the new dumps (a later change).
+        Event::DumpsChanged { .. } => {}
         Event::ShuttingDown => model.disconnect(Connection::ShuttingDown),
     }
 }

@@ -48,6 +48,15 @@ pub enum Event {
     /// A step or the end of a long operation that `POST /v1/jobs/...`
     /// started (ADR 0026).
     Job(JobEvent),
+    /// The dump server kept a new dump, or the list was cleared. At most a
+    /// few per second, however many dumps arrive (ADR 0027). A client asks
+    /// `GET /v1/dumps?after=<its latest id>` for the new ones.
+    DumpsChanged {
+        /// The id of the newest dump ever kept.
+        latest_id: u64,
+        /// How many dumps the daemon holds now.
+        count: u64,
+    },
     /// The daemon is stopping; the stream ends after this event.
     ShuttingDown,
 }

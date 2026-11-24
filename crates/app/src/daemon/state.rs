@@ -11,11 +11,13 @@ use std::time::Duration;
 
 use marsa_core::config::{self, ConfigError, ConfigPaths, SitesConfig};
 use marsa_core::databases::ServerKind;
+use marsa_core::dumps::DUMPS_PORT;
 use marsa_core::types::{Event, JobEvent, SiteList};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::autostart::Autostart;
+use super::dumps::DumpsService;
 use super::jobs::Jobs;
 use super::runtimes::installs::Installs;
 use super::services::caddy::CaddyManager;
@@ -77,6 +79,9 @@ pub struct Daemon {
     /// Valkey, the same way.
     valkey: ServerManager,
     mailpit: ServerManager,
+    /// The dump server and the dumps it kept (ADR 0027). The listener
+    /// starts in `server::run`, not here.
+    dumps: DumpsService,
     /// The DNS server for `.test`. Not listed here;
     /// `server::run` sets [`DnsService::for_daemon`].
     dns: DnsService,
@@ -115,6 +120,7 @@ impl Daemon {
             mysql: ServerManager::new(ServerKind::Mysql),
             valkey: ServerManager::new(ServerKind::Valkey),
             mailpit: ServerManager::new(ServerKind::Mailpit),
+            dumps: DumpsService::new(DUMPS_PORT),
             dns: DnsService::new(None),
             pools: Pools::default(),
             pass_requests: PassRequests::default(),
@@ -160,6 +166,16 @@ impl Daemon {
     /// the tests set its probes and ports.
     pub fn caddy_mut(&mut self) -> &mut CaddyManager {
         &mut self.caddy
+    }
+
+    pub fn dumps(&self) -> &DumpsService {
+        &self.dumps
+    }
+
+    /// The dump server, before the daemon is shared: a test gives it a
+    /// port of its own.
+    pub fn set_dumps(&mut self, dumps: DumpsService) {
+        self.dumps = dumps;
     }
 
     pub fn dns(&self) -> &DnsService {

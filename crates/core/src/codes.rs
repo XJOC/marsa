@@ -56,6 +56,8 @@ pub const DOWNLOAD_TOO_LARGE: &str = "download_too_large";
 pub const DUMP_INVALID: &str = "dump_invalid";
 /// A line over `dumps::MAX_LINE_BYTES`: the daemon keeps a note, not the line.
 pub const DUMP_TOO_LARGE: &str = "dump_too_large";
+/// Another program holds the dump server's port (for example `php artisan dump-server`).
+pub const DUMPS_PORT_IN_USE: &str = "dumps_port_in_use";
 pub const EXITED: &str = "exited";
 pub const EXTRACT_CORRUPT: &str = "extract_corrupt";
 pub const EXTRACT_DUPLICATE: &str = "extract_duplicate";
@@ -323,6 +325,7 @@ pub const ALL: &[&str] = &[
     DOWNLOAD_TOO_LARGE,
     DUMP_INVALID,
     DUMP_TOO_LARGE,
+    DUMPS_PORT_IN_USE,
     EXITED,
     EXTRACT_CORRUPT,
     EXTRACT_DUPLICATE,

@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use super::auth::AuthConfig;
 use super::routes as api;
 use crate::daemon::autostart::Autostart;
+use crate::daemon::dumps;
 use crate::daemon::services::caddy;
 use crate::daemon::services::databases;
 use crate::daemon::services::databases::client_shims::ClientShims;
@@ -167,6 +168,9 @@ pub async fn run(data_dir: PathBuf, dns_port: u16) -> anyhow::Result<()> {
     // After the first build, so it starts from its parked folders. It stops
     // when `daemon.shutdown` is cancelled.
     let watcher = sites::watch::start(&daemon);
+    // The dump server (ADR 0027): a port that another program holds is the
+    // status `port_in_use`, and `dump()` stays in the page.
+    dumps::start_at_launch(&daemon).await;
     // After the API listener. It stops when `daemon.shutdown` is cancelled. A
     // port in use is a failed `dns` service: the daemon runs on without it.
     daemon
@@ -188,7 +192,8 @@ pub async fn run(data_dir: PathBuf, dns_port: u16) -> anyhow::Result<()> {
     // after the shutdown's own sweep: `add_proc` told it to stop, and this
     // waits for it. The map is empty otherwise, and this returns at once.
     daemon.stop_procs(PROCS_LIMIT).await;
-    // Before the lock goes, so the next daemon finds the DNS port free.
+    // Before the lock goes, so the next daemon finds the ports free.
+    daemon.dumps().shutdown(dumps::STOP_LIMIT).await;
     daemon.dns().shutdown(dns::STOP_LIMIT).await;
 
     // The file goes before the lock, so a daemon that takes the lock next

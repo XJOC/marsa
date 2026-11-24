@@ -226,6 +226,13 @@ fn events_are_tagged() {
         }),
     );
     round_trip(&Event::ShuttingDown, json!({ "type": "shutting_down" }));
+    round_trip(
+        &Event::DumpsChanged {
+            latest_id: 7,
+            count: 3,
+        },
+        json!({ "type": "dumps_changed", "data": { "latest_id": 7, "count": 3 } }),
+    );
 }
 
 #[test]
