@@ -140,8 +140,7 @@ pub(crate) fn server_version(
 /// Node adds the certificates in this file to its own list.
 pub(crate) const NODE_EXTRA_CA_CERTS: &str = "NODE_EXTRA_CA_CERTS";
 
-/// PHP reads its `php.ini` from this path.
-pub(crate) const PHPRC: &str = "PHPRC";
+pub(crate) use marsa_core::php::PHPRC;
 
 /// A variable that makes the real program trust Marsa's CA, so a call from
 /// the terminal to a `.test` site passes TLS (architecture.md section 10).

@@ -28,6 +28,7 @@ use super::services::php::Pools;
 use super::services::supervisor::ServiceHandle;
 use super::sites::sync::PassRequests;
 use super::sites::{self, SitesError};
+use super::workers::Workers;
 
 /// How many events the bus keeps for a slow reader. A reader that falls
 /// further behind loses the oldest ones (`Lagged`).
@@ -88,6 +89,9 @@ pub struct Daemon {
     /// The status and recent lines of each php-fpm pool. The
     /// sites sync starts and stops the pools.
     pools: Pools,
+    /// The status and recent lines of each site's worker. The sites sync
+    /// starts and stops them.
+    workers: Workers,
     /// Asks the sites sync task for a pass, and waits for it.
     /// The task alone runs passes and owns the pools.
     pass_requests: PassRequests,
@@ -123,6 +127,7 @@ impl Daemon {
             dumps: DumpsService::new(DUMPS_PORT),
             dns: DnsService::new(None),
             pools: Pools::default(),
+            workers: Workers::default(),
             pass_requests: PassRequests::default(),
             client_shims: ClientShims::new(&data_dir),
             data_dir,
@@ -189,6 +194,10 @@ impl Daemon {
 
     pub fn pools(&self) -> &Pools {
         &self.pools
+    }
+
+    pub fn workers(&self) -> &Workers {
+        &self.workers
     }
 
     pub fn pass_requests(&self) -> &PassRequests {
@@ -387,6 +396,18 @@ impl Daemon {
     /// Takes the handle of `id` out, so the caller can stop it.
     pub fn take_proc(&self, id: ServiceId) -> Option<ServiceHandle> {
         self.lock_procs().remove(&id.to_string())
+    }
+
+    /// Asks the task of `id` to stop and leaves its handle in place, so a
+    /// shutdown that comes during its stop still waits for it. `false` if no
+    /// task runs `id`.
+    pub fn cancel_proc(&self, id: ServiceId) -> bool {
+        let procs = self.lock_procs();
+        let handle = procs.get(&id.to_string());
+        if let Some(handle) = handle {
+            handle.cancel.cancel();
+        }
+        handle.is_some()
     }
 
     /// Whether the task of `id` still runs.
