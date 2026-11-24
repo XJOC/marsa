@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::php::PHPRC;
 use crate::services::{RestartPolicy, ServiceSpec, StopMethod};
 use crate::types::{ServiceId, SiteKey, WorkerKind};
 
@@ -44,7 +45,9 @@ pub struct WorkerPaths<'a> {
 /// How the supervisor runs worker `kind` of `site`: `<php> -c <php.ini>
 /// artisan queue:work` in the site's folder. No shell, no extra arguments:
 /// the project's `config/queue.php` decides the rest. The environment is the
-/// daemon's: Laravel reads the project's own settings itself.
+/// daemon's, and `PHPRC` names the same `php.ini`, so the PHP that
+/// `schedule:work` starts for each task (`schedule:run`, without `-c`) reads
+/// it too. Laravel reads the project's own settings itself.
 pub fn worker_spec(kind: WorkerKind, site: SiteKey, paths: WorkerPaths<'_>) -> ServiceSpec {
     // `to_string_lossy` as in the pools: the app data dir comes from the OS
     // and is valid Unicode in practice.
@@ -54,11 +57,11 @@ pub fn worker_spec(kind: WorkerKind, site: SiteKey, paths: WorkerPaths<'_>) -> S
         program: paths.php.to_owned(),
         args: vec![
             "-c".to_owned(),
-            php_ini,
+            php_ini.clone(),
             "artisan".to_owned(),
             kind.command().to_owned(),
         ],
-        env: BTreeMap::new(),
+        env: BTreeMap::from([(PHPRC.to_owned(), php_ini)]),
         env_remove: Vec::new(),
         cwd: Some(paths.root.to_owned()),
         restart: RESTART,
@@ -97,7 +100,9 @@ mod tests {
             ["-c", "/data/php/8.4/php.ini", "artisan", "queue:work"]
         );
         assert_eq!(spec.cwd.as_deref(), Some(Path::new("/code/shop")));
-        assert!(spec.env.is_empty() && spec.env_remove.is_empty());
+        let phprc = BTreeMap::from([(PHPRC.to_owned(), "/data/php/8.4/php.ini".to_owned())]);
+        assert_eq!(spec.env, phprc);
+        assert!(spec.env_remove.is_empty());
         assert_eq!(spec.stop, StopMethod::term(QUEUE_GRACE));
         assert_eq!(spec.restart, RESTART);
     }
