@@ -378,6 +378,50 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "mail_unavailable" => "Mailpit did not answer as expected. Run \"marsa logs mailpit\" \
              to see why."
             .into(),
+        // The database browser (`marsa db`, ADR 0028). It opens Marsa's own
+        // servers and the sites' SQLite files only, and changes nothing.
+        "db_server_not_running" => format!(
+            "{service_first} is not running, so its databases cannot be opened. Run \
+             \"marsa services start {id}\", then try again."
+        ),
+        "db_source_invalid" => "That source, table, or column cannot be used. Write a source \
+             as mysql/<database>, postgres/<database>, or site/<site>."
+            .into(),
+        "db_not_found" => "The server has no database by that name. Run \"marsa db\" to see \
+             the databases."
+            .into(),
+        "db_table_not_found" => "The database has no table by that name. Run \"marsa db tables \
+             <source>\" to see the tables."
+            .into(),
+        "db_file_not_found" => format!(
+            "The site {site} has no SQLite file at database/database.sqlite. Marsa does not \
+             make one."
+        ),
+        "db_file_outside_site" => format!(
+            "The SQLite file of the site {site} is not a regular file inside the site's \
+             folder, so Marsa does not open it."
+        ),
+        "db_sign_in_failed" => format!(
+            "{service_first} refused Marsa's sign-in as root with no password. If you set a \
+             password for root, \"marsa db\" cannot open this server yet."
+        ),
+        "db_unavailable" => format!(
+            "{service_first} did not answer as expected. Run \"marsa logs {id}\" to see why."
+        ),
+        "db_timeout" => "The database took too long to answer, so Marsa stopped waiting.".into(),
+        "db_read_only" => "This statement changes data, and \"marsa db\" is read-only, so the \
+             database refused it."
+            .into(),
+        "db_one_statement" => "Run one statement at a time.".into(),
+        "db_sql_too_long" => "The statement is longer than 256 KB.".into(),
+        "db_query_failed" => "The database did not run the statement.".into(),
+        "db_query_cancelled" => "The statement was cancelled.".into(),
+        "db_busy" => "Another statement still runs on this database. Wait for it to end, or \
+             cancel it."
+            .into(),
+        "db_result_gone" => "Marsa no longer keeps the rows of that statement. Run it again."
+            .into(),
+        "job_not_cancellable" => "Only a running SQL statement can be cancelled.".into(),
         // Mailpit, the same way.
         "mailpit_not_installed" => "Mailpit is not installed. Run \"marsa install mailpit\", \
              then try again."

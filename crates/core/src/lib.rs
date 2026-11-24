@@ -11,6 +11,7 @@ pub mod codes;
 pub mod config;
 pub mod data_dir;
 pub mod databases;
+pub mod db_browser;
 pub mod dns;
 pub mod doctor;
 pub mod dumps;
