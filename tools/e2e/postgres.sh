@@ -240,6 +240,40 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 [ "$(tcp -U root -d postgres -c "$sleeping")" = 0 ] || fail "the cancelled statement still runs in PostgreSQL"
 
+step "marsa db: the browser on the command line, 100,000 rows, read-only, a cancel, and the idle close"
+ms() { perl -MTime::HiRes=time -e 'printf "%d", time * 1000'; }
+marsa db | tee "$RUNNER_TEMP/db.txt"
+grep -q '^postgres/app ' "$RUNNER_TEMP/db.txt" || fail "marsa db lists no postgres/app"
+! grep -qE '^postgres/(postgres|template0|template1) ' "$RUNNER_TEMP/db.txt" || fail "a system database is listed"
+tcp -U root -d app -c "create table big (id int primary key, v text); insert into big select i, 'row ' || i from generate_series(1, 100000) i; analyze big"
+marsa db tables postgres/app | grep -q '^big ' || fail "marsa db tables: no big"
+marsa db rows postgres/app big | tail -n 1 | grep -qx 'Rows 1 to 500 of 100,000.' || fail "the first page"
+begun=$(ms)
+last=$(marsa db rows postgres/app big --page 200 | tail -n 1)
+echo "the last page (OFFSET 99,500) took $(($(ms) - begun)) ms"
+[ "$last" = 'Rows 99,501 to 100,000 of 100,000.' ] || fail "the last page: $last"
+[ "$(marsa db rows postgres/app big --sort id --desc | sed -n 2p | awk '{print $1}')" = 100000 ] || fail "the reverse page"
+for sql in "INSERT INTO big VALUES (100001, 'x')" "CREATE TABLE t2 (a int)" "DROP TABLE big"; do
+  if out=$(marsa db query postgres/app "$sql" 2>&1); then fail "a write ran: $sql"; fi
+  grep -q 'db_read_only' <<<"$out" || fail "$sql: $out"
+done
+[ "$(tcp -U root -d app -c 'select count(*) from big')" = 100000 ] || fail "the rows changed"
+[ "$(tcp -U root -d app -c "select count(*) from pg_tables where schemaname = 'public'")" = 3 ] || fail "the tables changed"
+begun=$(ms)
+if out=$(marsa db query --timeout 2 postgres/app "SELECT pg_sleep(60)" 2>&1); then fail "the sleep was not cancelled"; fi
+took=$(($(ms) - begun))
+echo "the cancel took $took ms"
+grep -q db_query_cancelled <<<"$out" || fail "--timeout: $out"
+[ "$took" -lt 5000 ] || fail "--timeout 2 took $took ms"
+[ "$(tcp -U root -d postgres -c "$sleeping")" = 0 ] || fail "the cancelled statement still runs in PostgreSQL"
+if out=$(marsa db tables postgres/postgres 2>&1); then fail "a system database was opened"; fi
+grep -q db_not_found <<<"$out" || fail "postgres/postgres: $out"
+echo "no request for 70 s: the browser's connections close by themselves"
+sleep 70
+[ "$(tcp -U root -d postgres -c "$others")" = 0 ] || fail "a browser connection stayed open after 70 s idle"
+# Open again, for the stop below: it must not wait for the browser.
+marsa db tables postgres/app >/dev/null
+
 step "the running version cannot be uninstalled; its databases stay"
 refused 'in use' marsa uninstall postgres "$VERSION"
 [ -d "$PG" ] || fail "the running version was removed"
