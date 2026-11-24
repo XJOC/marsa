@@ -58,6 +58,9 @@ pub(super) struct FakeProbes {
     /// The first looks at an orphan that cannot be told, as a `ps` or
     /// `lsof` that fails.
     unknown_looks: Mutex<u32>,
+    /// When set, only this port has the owner of `lookup`; any other has
+    /// nobody. For a server with two ports.
+    pub(super) only_port: Option<u16>,
 }
 
 /// `owner` listens on the port, or nobody.
@@ -71,6 +74,7 @@ pub(super) fn probes(now: Liveness, owner: Option<&str>) -> FakeProbes {
         signals: Mutex::default(),
         unknown_after_signal: Mutex::default(),
         unknown_looks: Mutex::default(),
+        only_port: None,
     }
 }
 
@@ -108,8 +112,12 @@ impl ProcessProbe for FakeProbes {
         })
     }
 
-    fn port_lookup(&self, _port: u16) -> BoxFuture<'_, PortLookup> {
-        Box::pin(std::future::ready(self.lookup.clone()))
+    fn port_lookup(&self, port: u16) -> BoxFuture<'_, PortLookup> {
+        let lookup = match self.only_port {
+            Some(only) if only != port => PortLookup::Nobody,
+            _ => self.lookup.clone(),
+        };
+        Box::pin(std::future::ready(lookup))
     }
 
     fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {

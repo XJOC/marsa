@@ -26,7 +26,7 @@ use super::Failure;
 use super::daemon::{connect, failure};
 use super::setup;
 use super::strings::{self, Details};
-use super::text::printable;
+use super::text::{columns, printable};
 
 /// The sites commands. `bin/marsa.rs` flattens them into the top level, so
 /// each is a command of its own: `marsa park`, not `marsa sites park`.
@@ -573,22 +573,7 @@ fn table(sites: &[Site]) -> String {
             shown(&site.root),
         ]
     }));
-    let mut widths = [0; 5];
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-    let mut text = String::new();
-    for row in &rows {
-        let mut line = String::new();
-        for (cell, width) in row.iter().zip(widths) {
-            line.push_str(&format!("{cell:<width$}  "));
-        }
-        text.push_str(line.trim_end());
-        text.push('\n');
-    }
-    text
+    columns(&rows)
 }
 
 /// A path, safe to print.

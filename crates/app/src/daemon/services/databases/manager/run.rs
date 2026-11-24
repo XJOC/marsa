@@ -11,7 +11,7 @@ use marsa_core::types::{LogStream, ServiceId};
 use tokio::sync::watch;
 
 use super::super::orphan::{Recorded, RunRecord};
-use super::super::{mysql, postgres, valkey};
+use super::super::{mailpit, mysql, postgres, valkey};
 use super::{ActionError, ServerManager};
 use crate::daemon::services::supervisor::{ServiceHandle, Supervisor, lock};
 use crate::daemon::state::Daemon;
@@ -113,6 +113,7 @@ impl ServerManager {
             ServerKind::Postgres => postgres::answers(port).await,
             ServerKind::Mysql => mysql::answers(port).await,
             ServerKind::Valkey => valkey::answers(port).await,
+            ServerKind::Mailpit => mailpit::answers(port).await,
         }
     }
 

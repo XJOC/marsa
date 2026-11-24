@@ -15,6 +15,7 @@ use std::time::Duration;
 use semver::Version;
 
 pub mod clients;
+pub mod mailpit;
 pub mod mysql;
 mod start;
 pub mod valkey;
@@ -42,11 +43,18 @@ pub enum ServerKind {
     Mysql,
     /// The key-value server of Laravel's Redis cache and queue.
     Valkey,
+    /// The mail catcher ([`mailpit`]): not a database, but it runs like one.
+    Mailpit,
 }
 
 impl ServerKind {
     /// Every server, in the order lists show them.
-    pub const ALL: [ServerKind; 3] = [ServerKind::Postgres, ServerKind::Mysql, ServerKind::Valkey];
+    pub const ALL: [ServerKind; 4] = [
+        ServerKind::Postgres,
+        ServerKind::Mysql,
+        ServerKind::Valkey,
+        ServerKind::Mailpit,
+    ];
 
     /// The service id: the name in `marsa services`, the log file
     /// `logs/<id>.log`, the table in `global.toml`, and `run/<id>.pid`.
@@ -55,6 +63,7 @@ impl ServerKind {
             Self::Postgres => "postgres",
             Self::Mysql => "mysql",
             Self::Valkey => "valkey",
+            Self::Mailpit => "mailpit",
         }
     }
 
@@ -64,6 +73,7 @@ impl ServerKind {
             Self::Postgres => "PostgreSQL",
             Self::Mysql => "MySQL",
             Self::Valkey => "Valkey",
+            Self::Mailpit => "Mailpit",
         }
     }
 
@@ -83,6 +93,7 @@ impl ServerKind {
             Self::Postgres => Runtime::Postgres,
             Self::Mysql => Runtime::Mysql,
             Self::Valkey => Runtime::Valkey,
+            Self::Mailpit => Runtime::Mailpit,
         }
     }
 
@@ -93,6 +104,7 @@ impl ServerKind {
             Self::Postgres => POSTGRES_PORT,
             Self::Mysql => mysql::MYSQL_PORT,
             Self::Valkey => valkey::VALKEY_PORT,
+            Self::Mailpit => mailpit::MAILPIT_PORT,
         }
     }
 
@@ -103,6 +115,7 @@ impl ServerKind {
             Self::Postgres => "postgres",
             Self::Mysql => "mysqld",
             Self::Valkey => "valkey-server",
+            Self::Mailpit => "mailpit",
         }
     }
 
@@ -116,6 +129,7 @@ impl ServerKind {
             Self::Postgres => postgres_stop(),
             Self::Mysql => mysql::mysql_stop(),
             Self::Valkey => valkey::valkey_signals(),
+            Self::Mailpit => mailpit::mailpit_stop(),
         }
     }
 
@@ -125,6 +139,7 @@ impl ServerKind {
             Self::Postgres => &global.postgres,
             Self::Mysql => &global.mysql,
             Self::Valkey => &global.valkey,
+            Self::Mailpit => &global.mailpit,
         }
     }
 
@@ -134,6 +149,7 @@ impl ServerKind {
             Self::Postgres => &mut global.postgres,
             Self::Mysql => &mut global.mysql,
             Self::Valkey => &mut global.valkey,
+            Self::Mailpit => &mut global.mailpit,
         }
     }
 
@@ -144,7 +160,9 @@ impl ServerKind {
     pub fn line(self, version: &Version) -> String {
         match self {
             Self::Postgres => version.major.to_string(),
-            Self::Mysql | Self::Valkey => format!("{}.{}", version.major, version.minor),
+            Self::Mysql | Self::Valkey | Self::Mailpit => {
+                format!("{}.{}", version.major, version.minor)
+            }
         }
     }
 
@@ -158,7 +176,7 @@ impl ServerKind {
                 let major = default.parse::<u64>().ok()?;
                 Some(version.major == major)
             }
-            Self::Mysql | Self::Valkey => {
+            Self::Mysql | Self::Valkey | Self::Mailpit => {
                 let (major, minor) = default.split_once('.')?;
                 let number = |text: &str| {
                     let digits = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());

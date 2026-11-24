@@ -1,6 +1,6 @@
 //! The dialogs the shell draws over the whole window, after the screen
 //! (components.md, Dialogs): the confirmation of a removal (Unlink, Forget,
-//! Uninstall) and the install dialog. Every one is the design's
+//! Uninstall, Delete all mail) and the install dialog. Every one is the design's
 //! [`ConfirmDialog`] over the scrim, so no screen draws a dialog of its own
 //! and any screen can open one.
 //!
@@ -44,6 +44,7 @@ pub(crate) fn confirm_view(model: &Model) -> Option<ConfirmView> {
         Removal::Unlink { site } => ("unlink", removal.text(model.site_root(site), 0, home)),
         Removal::Forget { folder } => ("forget", removal.text(None, model.sites_in(folder), home)),
         Removal::Uninstall { .. } => ("uninstall", removal.text(None, 0, home)),
+        Removal::Mail => ("delete_mail", removal.text(None, 0, home)),
     };
     Some(ConfirmView {
         id,

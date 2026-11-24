@@ -12,13 +12,14 @@ use marsa_core::resolver;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
     DoctorReport, Event, Health, HostsStatus, InstallEvent, InstallFailure, InstallProgress,
-    InstallUpdate, LogLine, PoolKind, RuntimeList, ServiceAction, ServiceId, ServiceState,
-    ServiceStatus, SetupReport, Site, SiteList, Source, VersionInUse, XdebugState,
+    InstallUpdate, LogLine, MailList, MailText, PoolKind, RuntimeList, ServiceAction, ServiceId,
+    ServiceState, ServiceStatus, SetupReport, Site, SiteList, Source, VersionInUse, XdebugState,
 };
 use semver::Version;
 
 mod installs;
 mod logs;
+mod mail;
 mod notices;
 mod removals;
 mod runtimes;
@@ -29,6 +30,7 @@ mod sites;
 use installs::Install;
 pub use installs::{InstallJob, InstallStep, InstallView, install_version};
 pub use logs::{LogRow, LogSource, MAX_LOG_LINES, ServiceLog};
+pub use mail::{MAILPIT, MailState, mailpit_url};
 pub use notices::{NoticeSource, Notices};
 pub use removals::{Removal, UninstallNotice};
 pub use runtimes::{
@@ -63,6 +65,8 @@ pub enum Effect {
     OpenFolder(PathBuf),
     /// Open the system's folder dialog.
     PickFolder(Pick),
+    /// Open this page of Mailpit's in the browser.
+    OpenUrl(String),
 }
 
 impl Effect {
@@ -179,6 +183,14 @@ pub enum Update {
     /// "Add to /etc/hosts" did not run, or the daemon could not be reached.
     /// A client error code.
     HostsSyncFailed(String),
+    /// The newest mails Mailpit caught. The bridge sends a list only when it
+    /// differs from the last one it sent.
+    Mail(MailList),
+    /// The text of a mail the user opened.
+    MailText(MailText),
+    /// Reading the list failed. A client error code; `mail_not_running`
+    /// while Mailpit does not run.
+    MailFailed(String),
     Event(Event),
 }
 
@@ -196,6 +208,7 @@ pub enum Route {
     Runtimes(Runtime),
     Services,
     Logs(LogSource),
+    Mail,
     Settings,
 }
 
@@ -294,6 +307,14 @@ pub enum Action {
     /// An option of the Appearance control in Settings. `App` applies it at
     /// once and writes it to `gui.toml`.
     SetAppearance(Appearance),
+    /// A row of the Mail list, by the mail's id: its text is read.
+    ChooseMail(String),
+    /// "Delete all…" on Mail: the confirmation opens.
+    AskDeleteMail,
+    /// "Open Mailpit": Mailpit's page in the browser.
+    OpenMailpit,
+    /// "Open in browser": the chosen mail's page in Mailpit, with its HTML.
+    OpenMailPage,
 }
 
 /// The window's state: the daemon's session, and what belongs to the window
@@ -436,6 +457,9 @@ impl Model {
             } => self.not_removed(removal, code, in_use),
             Update::Xdebug(state) => self.session.xdebug = Some(state),
             Update::XdebugFailed(code) => self.session.notices.set_code(NoticeSource::Xdebug, code),
+            Update::Mail(list) => self.set_mail(list),
+            Update::MailText(text) => self.set_mail_text(text),
+            Update::MailFailed(code) => self.mail_failed(code),
             Update::XdebugAnswered(answer) => {
                 self.session.xdebug_pending = None;
                 match answer {
@@ -472,6 +496,8 @@ impl Model {
                 .map_or(Effect::None, |root| Effect::OpenFolder(root.to_path_buf())),
             Action::OpenDataFolder => Effect::OpenFolder(self.data_dir.clone()),
             Action::PickFolder(pick) => Effect::PickFolder(pick),
+            Action::OpenMailpit => Effect::OpenUrl(mailpit_url()),
+            Action::OpenMailPage => self.mail_page().map_or(Effect::None, Effect::OpenUrl),
             action => self.change(action).or_else(|| self.next_command()).into(),
         }
     }
@@ -508,8 +534,10 @@ impl Model {
                 if let Route::Runtimes(runtime) = &route {
                     self.runtime_chosen = Some(*runtime);
                 }
+                // No event carries mail: the screen reads it as it opens.
+                let read = route == Route::Mail;
                 self.route = route;
-                None
+                if read { self.read_mail() } else { None }
             }
             Action::FoldSidebar => {
                 self.sidebar_folded = !self.sidebar_folded;
@@ -619,7 +647,16 @@ impl Model {
             }
             Action::ToggleXdebug => self.toggle_xdebug().map(Command::SetXdebug),
             Action::ToggleAutostart => self.toggle_autostart().map(Command::SetAutostart),
-            Action::ConfirmRemoval => self.confirm_removal().map(Command::Remove),
+            Action::ConfirmRemoval => self.confirm_removal().map(|removal| match removal {
+                // The bridge's mail reader deletes it, in order with its reads.
+                Removal::Mail => Command::ClearMail,
+                removal => Command::Remove(removal),
+            }),
+            Action::ChooseMail(id) => self.choose_mail(id),
+            Action::AskDeleteMail => {
+                self.ask_removal(Removal::Mail);
+                None
+            }
             Action::CancelRemoval => {
                 self.cancel_removal();
                 None
@@ -634,7 +671,9 @@ impl Model {
             Action::OpenSite(_)
             | Action::OpenFolder(_)
             | Action::OpenDataFolder
-            | Action::PickFolder(_) => None,
+            | Action::PickFolder(_)
+            | Action::OpenMailpit
+            | Action::OpenMailPage => None,
         }
     }
 }

@@ -1,8 +1,9 @@
 //! The small widgets of the design (`docs/design/components.md`): icons,
 //! tiles, list items, buttons, chips, menus, the switch, the segmented
-//! control, badges, the text field, the log line, the sidebar item, and the
-//! step card. They are the only place that draws these; a screen adds them
-//! with `ui.add(...)` and never reaches for a raw egui button (rules.md 3).
+//! control, badges, the text field, the log line, the mail row, the sidebar
+//! item, and the step card. They are the only place that draws these; a
+//! screen adds them with `ui.add(...)` and never reaches for a raw egui
+//! button (rules.md 3).
 //! [Laravel: Blade components; each takes its props with a builder and
 //! returns what the user did.]
 //!
@@ -35,6 +36,7 @@ pub mod icons;
 pub mod keys;
 pub mod list_item;
 pub mod log_entry;
+pub mod mail_row;
 pub mod menu;
 pub mod nav;
 pub mod notice;
@@ -69,6 +71,7 @@ pub use field::Field;
 pub use icons::{Glyph, Icon};
 pub use list_item::ListItem;
 pub use log_entry::{LogEntry, level_color};
+pub use mail_row::MailRow;
 pub use menu::{Item as MenuItem, Menu};
 pub use nav::NavItem;
 pub use notice::{Notice, NoticeBar, NoticeKind, Progress, Reaction};

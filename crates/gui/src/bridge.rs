@@ -5,6 +5,8 @@
 //! tokio channel. [`DaemonClient`] never leaves this module, so the token
 //! never reaches the drawing code (architecture.md section 3).
 
+mod mail;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::thread;
@@ -56,6 +58,13 @@ pub enum Command {
     /// "Add to /etc/hosts" (Linux): the only way the window
     /// syncs the hosts file, so a password prompt comes from a click only.
     SyncHosts,
+    /// The Mail screen opened: the newest mails.
+    ReadMail,
+    /// A mail of the list was opened, by its id: its text. Mailpit marks it
+    /// read.
+    ReadMailText(String),
+    /// The confirmed "Delete all…" of Mail.
+    ClearMail,
 }
 
 /// The window's end of the bridge.
@@ -238,7 +247,9 @@ async fn session(
     };
     // Buttons pressed before this connection were meant for the last one.
     while commands.try_recv().is_ok() {}
-    if !window.send(Update::Connected(health)) || !refresh(&client, window).await {
+    // Stops with this session when it is dropped.
+    let mail = mail::Mail::start(&client, window);
+    if !window.send(Update::Connected(health)) || !refresh(&client, window, &mail).await {
         return End::Closed;
     }
     read_doctor(&client, window);
@@ -252,6 +263,9 @@ async fn session(
                 Some(Ok(StreamItem::Item(event))) => {
                     if let Event::SitesChanged(list) = &event {
                         log_sites("sites changed", list);
+                    }
+                    if let Event::ServiceChanged(status) = &event {
+                        mail.follow(status);
                     }
                     let installed = matches!(
                         &event,
@@ -280,7 +294,7 @@ async fn session(
                 // Events were dropped, so the table may be stale.
                 Some(Ok(StreamItem::Lagged(count))) => {
                     tracing::warn!(count, "the daemon dropped events; reading the state again");
-                    if !refresh(&client, window).await {
+                    if !refresh(&client, window, &mail).await {
                         return End::Closed;
                     }
                 }
@@ -292,6 +306,9 @@ async fn session(
                 None => return End::Lost,
             },
             command = commands.recv() => match command {
+                Some(Command::ReadMail) => mail.send(mail::Job::Read),
+                Some(Command::ReadMailText(id)) => mail.send(mail::Job::Text(id)),
+                Some(Command::ClearMail) => mail.send(mail::Job::Clear),
                 Some(command) => run_command(&client, command, window.clone(), reread.clone()),
                 None => return End::Closed,
             },
@@ -312,11 +329,14 @@ async fn runtimes_changed(client: &DaemonClient, window: &Window) -> bool {
 }
 
 /// Sends the whole services table, the site list, the runtimes, whether the
-/// icon starts at login, whether PHP loads Xdebug, and the recent log lines.
-/// A failed read is a notice: the events still keep the window up to date.
-/// `false` once the window is gone.
-async fn refresh(client: &DaemonClient, window: &Window) -> bool {
+/// icon starts at login, whether PHP loads Xdebug, and the recent log lines,
+/// and tells `mail` whether Mailpit runs. A failed read is a notice: the
+/// events still keep the window up to date. `false` once the window is gone.
+async fn refresh(client: &DaemonClient, window: &Window, mail: &mail::Mail) -> bool {
     let table = client.services().await;
+    for service in table.as_deref().unwrap_or_default() {
+        mail.follow(service);
+    }
     // The log of every service the daemon lists, and Caddy's whatever the
     // table says: the Logs screen has one source for each.
     let log_ids = log_ids(table.as_deref().unwrap_or_default());
@@ -541,6 +561,8 @@ fn run_command(
                 }
                 None
             }
+            // The session's mail reader runs these, one at a time.
+            Command::ReadMail | Command::ReadMailText(_) | Command::ClearMail => None,
             Command::SetXdebug(enabled) => Some(match client.set_xdebug(enabled).await {
                 Ok(state) => {
                     tracing::info!(enabled, "Xdebug changed");
@@ -592,6 +614,9 @@ async fn remove(client: &DaemonClient, removal: Removal) -> Update {
             .map(drop),
         Removal::Unlink { site } => client.unlink(site).await.map(drop),
         Removal::Forget { folder } => client.forget(folder).await.map(drop),
+        // The window sends `ClearMail` for this one, to the mail reader,
+        // which also sends the list after; this deletes the same.
+        Removal::Mail => client.clear_mail().await.map(drop),
     };
     match result {
         Ok(()) => {

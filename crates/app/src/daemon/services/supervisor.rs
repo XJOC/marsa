@@ -545,6 +545,9 @@ fn command(spec: &ServiceSpec) -> Command {
         // ADR 0009: a panic or a return from `main` kills the child too. No
         // `process_group(0)`: a Ctrl+C in the terminal must reach the child.
         .kill_on_drop(true);
+    for name in &spec.env_remove {
+        cmd.env_remove(name);
+    }
     if let Some(cwd) = &spec.cwd {
         cmd.current_dir(cwd);
     }

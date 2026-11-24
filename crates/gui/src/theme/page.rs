@@ -54,3 +54,11 @@ pub const RUNTIMES_TAG_COLUMN: f32 = 90.0;
 /// control, so a long value is cut short instead of squeezing the text.
 pub const SETTINGS_WIDTH: f32 = 680.0;
 pub const SETTINGS_TEXT_MIN: f32 = 220.0;
+
+/// The Mail screen (layout.md, Mail screen): the list on the start side,
+/// wider than the 190 to 220 of Runtimes because a row carries a sender and
+/// a subject; the label column of the chosen mail's facts; and the widest
+/// the sentences of an empty state get, so they wrap into a block.
+pub const MAIL_LIST_WIDTH: f32 = 340.0;
+pub const MAIL_FACT_LABEL: f32 = 70.0;
+pub const MAIL_STATE_WIDTH: f32 = 440.0;

@@ -7,6 +7,7 @@ pub(crate) mod first_run;
 pub(crate) mod home;
 pub(crate) mod lines;
 pub(crate) mod logs;
+pub(crate) mod mail;
 pub(crate) mod panel;
 pub(crate) mod runtimes;
 pub(crate) mod services;

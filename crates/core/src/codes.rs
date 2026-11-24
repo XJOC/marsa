@@ -87,6 +87,15 @@ pub const INVALID_ID: &str = "invalid_id";
 pub const INVALID_PATH: &str = "invalid_path";
 pub const INVALID_QUERY: &str = "invalid_query";
 pub const INVALID_VERSION: &str = "invalid_version";
+pub const MAIL_ID_INVALID: &str = "mail_id_invalid";
+pub const MAIL_NOT_FOUND: &str = "mail_not_found";
+pub const MAIL_NOT_RUNNING: &str = "mail_not_running";
+pub const MAIL_UNAVAILABLE: &str = "mail_unavailable";
+pub const MAILPIT_INIT_FAILED: &str = "mailpit_init_failed";
+pub const MAILPIT_NOT_INSTALLED: &str = "mailpit_not_installed";
+pub const MAILPIT_ORPHAN_STUCK: &str = "mailpit_orphan_stuck";
+pub const MAILPIT_START_TIMEOUT: &str = "mailpit_start_timeout";
+pub const MAILPIT_UNSUPPORTED_PLATFORM: &str = "mailpit_unsupported_platform";
 pub const MANIFEST_BAD_SIGNATURE: &str = "manifest_bad_signature";
 pub const MANIFEST_INVALID: &str = "manifest_invalid";
 pub const MANIFEST_NO_TRUSTED_KEY: &str = "manifest_no_trusted_key";
@@ -343,6 +352,15 @@ pub const ALL: &[&str] = &[
     INVALID_PATH,
     INVALID_QUERY,
     INVALID_VERSION,
+    MAIL_ID_INVALID,
+    MAIL_NOT_FOUND,
+    MAIL_NOT_RUNNING,
+    MAIL_UNAVAILABLE,
+    MAILPIT_INIT_FAILED,
+    MAILPIT_NOT_INSTALLED,
+    MAILPIT_ORPHAN_STUCK,
+    MAILPIT_START_TIMEOUT,
+    MAILPIT_UNSUPPORTED_PLATFORM,
     MANIFEST_BAD_SIGNATURE,
     MANIFEST_INVALID,
     MANIFEST_NO_TRUSTED_KEY,

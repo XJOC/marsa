@@ -213,6 +213,7 @@ fn spec(mode: &str, restart: RestartPolicy, stop: StopMethod) -> ServiceSpec {
             .map(String::from)
             .to_vec(),
         env: BTreeMap::from([(FAKE.to_owned(), mode.to_owned())]),
+        env_remove: Vec::new(),
         cwd: None,
         restart,
         stop,
@@ -344,6 +345,7 @@ fn a_relative_program_is_rejected() {
         program: "caddy".into(),
         args: Vec::new(),
         env: BTreeMap::new(),
+        env_remove: Vec::new(),
         cwd: None,
         restart: RestartPolicy::Never,
         stop: StopMethod::term(GRACE),

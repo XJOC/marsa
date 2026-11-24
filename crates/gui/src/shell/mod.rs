@@ -122,6 +122,12 @@ fn screen(ui: &mut Ui, model: &Model, picking: bool, out: &mut Output) {
             let view = screens::logs::view(model, &source);
             out.actions.extend(screens::logs::show(ui, &view, theme));
         }
+        // The list and the text fill the height and scroll themselves.
+        Item::Mail => {
+            let theme = Theme::of(ui.ctx());
+            let view = screens::mail::view(model, screens::mail::now_ms());
+            out.actions.extend(screens::mail::show(ui, &view, theme));
+        }
         Item::Runtimes => scrolled(ui, item, |ui| {
             let theme = Theme::of(ui.ctx());
             let view = screens::runtimes::view(model);
