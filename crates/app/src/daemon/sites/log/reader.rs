@@ -86,7 +86,15 @@ impl LogDir {
     /// used to compare only; its path never leaves this function.
     fn check(&self) -> Result<bool, LogError> {
         let meta = match fs::symlink_metadata(&self.dir) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+            // Windows says "not found" where Unix says "not a directory".
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return match fs::symlink_metadata(self.root.join("storage")) {
+                    Ok(storage) if !storage.is_dir() && !storage.file_type().is_symlink() => {
+                        Err(LogError::Unsafe("storage is not a folder"))
+                    }
+                    _ => Ok(false),
+                };
+            }
             Err(err) if err.kind() == io::ErrorKind::NotADirectory => {
                 return Err(LogError::Unsafe("storage is not a folder"));
             }
