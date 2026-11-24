@@ -55,10 +55,10 @@ fn a_worker_runs_the_sites_php_cli_with_its_php_ini() {
     )
     .unwrap();
     assert_eq!(plan.spec.program, data.join("runtimes/php/8.4.1/bin/php"));
-    assert_eq!(
-        plan.spec.args[1],
-        data.join("php/8.4/php.ini").to_string_lossy()
-    );
+    // Built as the daemon builds it: Windows joins with `\`.
+    let version = semver::Version::new(8, 4, 1);
+    let ini = PhpFiles::new(data, &version).ini_file;
+    assert_eq!(plan.spec.args[1], ini.to_string_lossy());
     assert_eq!(plan.spec.cwd.as_deref(), Some(root));
     let windows = super::plan(
         data,
@@ -293,12 +293,93 @@ mod real {
         manager.sync(&daemon, std::slice::from_ref(&on)).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(worker_failed(&wait_for(&daemon, |_| true).await));
+        assert!(!daemon.proc_alive(queue()));
 
         // A restart asked for does.
         daemon.workers().ask_restart(queue());
         manager.sync(&daemon, std::slice::from_ref(&on)).await;
         let back = wait_for(&daemon, running).await;
         assert_eq!(back.restarts, 0);
+        daemon.stop_procs(WAIT).await;
+        gone(back.pid.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn a_restart_asked_for_or_a_new_php_ini_starts_a_running_worker_again() {
+        let Setup {
+            _temp,
+            data,
+            root,
+            daemon,
+            mut manager,
+        } = setup();
+        install_php(&data, "8.4.1");
+        let on = site(&root, SiteKind::Laravel, Some("8.4.1"), true, false);
+        manager.sync(&daemon, std::slice::from_ref(&on)).await;
+        let first = wait_for(&daemon, running).await;
+
+        daemon.workers().ask_restart(queue());
+        manager.sync(&daemon, std::slice::from_ref(&on)).await;
+        let second = wait_for(&daemon, |s| running(s) && s.pid != first.pid).await;
+        gone(first.pid.unwrap()).await;
+
+        // Xdebug turned on, for example: `php.ini` changed.
+        fs::write(data.join("php/8.4/php.ini"), "zend_extension=xdebug\n").unwrap();
+        manager.sync(&daemon, std::slice::from_ref(&on)).await;
+        let third = wait_for(&daemon, |s| running(s) && s.pid != second.pid).await;
+        gone(second.pid.unwrap()).await;
+        daemon.stop_procs(WAIT).await;
+        gone(third.pid.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn a_running_worker_whose_site_loses_php_stops_and_says_why() {
+        let Setup {
+            _temp,
+            data,
+            root,
+            daemon,
+            mut manager,
+        } = setup();
+        install_php(&data, "8.4.1");
+        let both = site(&root, SiteKind::Laravel, Some("8.4.1"), true, true);
+        manager.sync(&daemon, &[both]).await;
+        let first = wait_for(&daemon, running).await;
+        let none = site(&root, SiteKind::Laravel, None, true, true);
+        manager.sync(&daemon, &[none]).await;
+        let failed = ServiceState::Failed {
+            code: codes::PHP_NOT_INSTALLED.to_owned(),
+        };
+        assert_eq!(wait_for(&daemon, |_| true).await.state, failed);
+        assert!(!daemon.proc_alive(queue()));
+        gone(first.pid.unwrap()).await;
+        assert_eq!(daemon.workers().statuses().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_worker_turned_off_and_on_goes_on_with_its_lines() {
+        let Setup {
+            _temp,
+            data,
+            root,
+            daemon,
+            mut manager,
+        } = setup();
+        install_php(&data, "8.4.1");
+        let on = site(&root, SiteKind::Laravel, Some("8.4.1"), true, true);
+        let off = site(&root, SiteKind::Laravel, Some("8.4.1"), false, false);
+        manager.sync(&daemon, std::slice::from_ref(&on)).await;
+        wait_line(&daemon, "artisan queue:work").await;
+        let before = lock(&daemon.workers().find(queue()).unwrap()).logs.recent();
+        let last = before.last().unwrap().seq;
+        // Both at once: their stops overlap.
+        manager.sync(&daemon, std::slice::from_ref(&off)).await;
+        assert!(daemon.workers().statuses().is_empty());
+        manager.sync(&daemon, &[on]).await;
+        let back = wait_for(&daemon, running).await;
+        let after = lock(&daemon.workers().find(queue()).unwrap()).logs.recent();
+        assert!(after.iter().any(|line| line.seq > last));
+        assert!(after.windows(2).all(|pair| pair[0].seq < pair[1].seq));
         daemon.stop_procs(WAIT).await;
         gone(back.pid.unwrap()).await;
     }

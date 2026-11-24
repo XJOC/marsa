@@ -398,6 +398,18 @@ impl Daemon {
         self.lock_procs().remove(&id.to_string())
     }
 
+    /// Asks the task of `id` to stop and leaves its handle in place, so a
+    /// shutdown that comes during its stop still waits for it. `false` if no
+    /// task runs `id`.
+    pub fn cancel_proc(&self, id: ServiceId) -> bool {
+        let procs = self.lock_procs();
+        let handle = procs.get(&id.to_string());
+        if let Some(handle) = handle {
+            handle.cancel.cancel();
+        }
+        handle.is_some()
+    }
+
     /// Whether the task of `id` still runs.
     pub fn proc_alive(&self, id: ServiceId) -> bool {
         let procs = self.lock_procs();

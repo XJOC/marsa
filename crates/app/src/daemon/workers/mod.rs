@@ -27,14 +27,14 @@ use std::sync::{Arc, Mutex};
 use marsa_core::codes;
 use marsa_core::data_dir::DataDir;
 use marsa_core::php::PhpFiles;
-use marsa_core::recipes::{self, Platform};
-use marsa_core::runtimes::{Runtime, RuntimesDir};
+use marsa_core::recipes::Platform;
 use marsa_core::services::{RestartPolicy, ServiceSpec};
 use marsa_core::sites::{Site, SiteKind};
 use marsa_core::types::{ServiceId, ServiceState, ServiceStatus, SiteKey, WorkerKind};
 use marsa_core::workers::{self, WorkerPaths, worker_spec};
 use tracing::{info, warn};
 
+use crate::daemon::services::php;
 use crate::daemon::services::supervisor::{ServiceRuntime, Supervisor, lock};
 use crate::daemon::state::Daemon;
 
@@ -42,15 +42,31 @@ use crate::daemon::state::Daemon;
 /// the routes, and the restarts the routes asked for.
 #[derive(Debug, Default)]
 pub struct Workers {
-    runtimes: Mutex<BTreeMap<ServiceId, Arc<Mutex<ServiceRuntime>>>>,
+    inner: Mutex<Inner>,
     restarts: Mutex<BTreeSet<ServiceId>>,
+}
+
+#[derive(Debug, Default)]
+struct Inner {
+    /// Every worker of this run. A worker turned off keeps its runtime, so
+    /// its `seq` goes on if it is turned on again: a client never sees it go
+    /// back.
+    runtimes: BTreeMap<ServiceId, Arc<Mutex<ServiceRuntime>>>,
+    /// The ones wanted now: the routes see these only.
+    listed: BTreeSet<ServiceId>,
 }
 
 impl Workers {
     /// The status of each worker, by id.
     pub fn statuses(&self) -> Vec<ServiceStatus> {
         // Copied out first: one lock at a time.
-        let runtimes: Vec<_> = lock(&self.runtimes).values().cloned().collect();
+        let runtimes: Vec<_> = {
+            let inner = lock(&self.inner);
+            let listed = inner.listed.iter();
+            listed
+                .filter_map(|id| inner.runtimes.get(id).cloned())
+                .collect()
+        };
         runtimes
             .iter()
             .map(|runtime| lock(runtime).status.clone())
@@ -59,7 +75,12 @@ impl Workers {
 
     /// The runtime of worker `id`, if it is wanted now.
     pub fn find(&self, id: ServiceId) -> Option<Arc<Mutex<ServiceRuntime>>> {
-        lock(&self.runtimes).get(&id).cloned()
+        let inner = lock(&self.inner);
+        inner
+            .listed
+            .contains(&id)
+            .then(|| inner.runtimes.get(&id).cloned())
+            .flatten()
     }
 
     /// Asks the next pass to start worker `id` again, also after its restarts
@@ -72,23 +93,28 @@ impl Workers {
         std::mem::take(&mut *lock(&self.restarts))
     }
 
-    /// The runtime of worker `id`, made on first use.
+    /// The runtime of worker `id`, made on first use, and listed.
     fn runtime(&self, id: ServiceId) -> Arc<Mutex<ServiceRuntime>> {
-        let mut runtimes = lock(&self.runtimes);
-        let runtime = runtimes
+        let mut inner = lock(&self.inner);
+        inner.listed.insert(id);
+        let runtime = inner
+            .runtimes
             .entry(id)
             .or_insert_with(|| Arc::new(Mutex::new(ServiceRuntime::new(id))));
         Arc::clone(runtime)
     }
 
-    fn ids(&self) -> Vec<ServiceId> {
-        lock(&self.runtimes).keys().copied().collect()
+    fn listed(&self) -> Vec<ServiceId> {
+        lock(&self.inner).listed.iter().copied().collect()
     }
 
-    fn forget(&self, id: ServiceId) {
-        lock(&self.runtimes).remove(&id);
+    fn unlist(&self, id: ServiceId) {
+        lock(&self.inner).listed.remove(&id);
     }
 }
+
+/// How often [`stop_workers`] looks whether the stopped tasks ended.
+const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How one worker runs. A change of any part starts it again.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +122,20 @@ struct Plan {
     spec: ServiceSpec,
     /// The text of its `php.ini`: Xdebug turned on or off, or the CA bundle
     /// that appeared, reaches a running worker only through a new start.
-    ini: String,
+    /// `None`: it could not be read now (a lock held for a moment on
+    /// Windows), which is no reason to stop a running worker.
+    ini: Option<String>,
+}
+
+impl Plan {
+    /// Whether a worker that runs `self` already runs `wanted`.
+    fn runs(&self, wanted: &Plan) -> bool {
+        self.spec == wanted.spec
+            && wanted
+                .ini
+                .as_ref()
+                .is_none_or(|ini| Some(ini) == self.ini.as_ref())
+    }
 }
 
 /// Each wanted worker, and how it runs or the code of why it cannot.
@@ -137,7 +176,11 @@ fn plan(
     let files = PhpFiles::new(data_dir, version);
     // Not written yet (no pass of PHP so far): the worker starts, and the
     // next pass, which writes it, starts it again.
-    let ini = fs::read_to_string(&files.ini_file).unwrap_or_default();
+    let ini = match fs::read_to_string(&files.ini_file) {
+        Ok(text) => Some(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Some(String::new()),
+        Err(_) => None,
+    };
     let paths = WorkerPaths {
         php: &php,
         php_ini: &files.ini_file,
@@ -149,19 +192,14 @@ fn plan(
     })
 }
 
-/// Where the recipe puts the PHP CLI of `version`: `bin/php` on macOS and
-/// Linux, `php.exe` on Windows. `None` on a system Marsa has no PHP for.
+/// The PHP CLI of `version`: `bin/php` on macOS and Linux, `php.exe` on
+/// Windows. `None` on a system Marsa has no PHP for.
 fn php_program(
     data_dir: &Path,
     platform: Option<Platform>,
     version: &semver::Version,
 ) -> Option<PathBuf> {
-    // A test parses every built-in recipe, so an error here never ships.
-    let recipe = recipes::builtin(Runtime::Php).ok()?;
-    let version_dir = RuntimesDir::in_dir(data_dir).version_dir(Runtime::Php, version);
-    recipe
-        .platform(platform?)?
-        .program_path(&version_dir, "php")
+    php::php_program(data_dir, platform?, version, "php")
 }
 
 /// Starts and stops the workers. The sites sync owns it.
@@ -187,6 +225,11 @@ impl WorkerManager {
 
     /// Brings the workers in line with `sites` (see the module).
     pub async fn sync(&mut self, daemon: &Daemon, sites: &[Site]) {
+        // `stop_procs` may have taken the handles: a start now would run a
+        // second process next to one that is still stopping.
+        if daemon.shutdown().is_cancelled() {
+            return;
+        }
         let data_dir = self.data_dir.clone();
         let platform = self.platform;
         let list = sites.to_vec();
@@ -200,34 +243,47 @@ impl WorkerManager {
             }
         };
         let forced = daemon.workers().take_restarts();
-        for id in daemon.workers().ids() {
-            if !wanted.contains_key(&id) {
-                stop_worker(daemon, id).await;
-                self.running.remove(&id);
-                daemon.workers().forget(id);
-                info!(service = %id, "worker stopped: its site no longer asks for it");
+        let gone: Vec<ServiceId> = daemon
+            .workers()
+            .listed()
+            .into_iter()
+            .filter(|id| !wanted.contains_key(id))
+            .collect();
+        let mut stop = gone.clone();
+        let mut start = Vec::new();
+        for (id, plan) in &wanted {
+            match plan {
+                Err(_) => stop.push(*id),
+                Ok(plan)
+                    if !self
+                        .running
+                        .get(id)
+                        .is_some_and(|running| running.runs(plan))
+                        || forced.contains(id) =>
+                {
+                    // The run before, if any: changed, or asked to restart.
+                    stop.push(*id);
+                    start.push((*id, plan));
+                }
+                Ok(_) => {}
             }
         }
-        for (id, plan) in wanted {
-            match plan {
-                Err(code) => {
-                    stop_worker(daemon, id).await;
-                    self.running.remove(&id);
-                    cannot_run(daemon, id, code);
-                }
-                Ok(plan) => {
-                    let same = self.running.get(&id) == Some(&plan);
-                    if same && !forced.contains(&id) {
-                        continue;
-                    }
-                    // The run before, if any: changed, or asked to restart.
-                    stop_worker(daemon, id).await;
-                    if self.start(daemon, &plan) {
-                        self.running.insert(id, plan);
-                    } else {
-                        self.running.remove(&id);
-                    }
-                }
+        stop_workers(daemon, &stop).await;
+        for id in &stop {
+            self.running.remove(id);
+        }
+        for id in gone {
+            daemon.workers().unlist(id);
+            info!(service = %id, "worker stopped: its site no longer asks for it");
+        }
+        for (id, plan) in &wanted {
+            if let Err(code) = plan {
+                cannot_run(daemon, *id, code);
+            }
+        }
+        for (id, plan) in start {
+            if self.start(daemon, plan) {
+                self.running.insert(id, plan.clone());
             }
         }
     }
@@ -244,7 +300,7 @@ impl WorkerManager {
         match Supervisor::spawn_on(spec, events, &logs_dir, Arc::clone(&runtime)) {
             Ok(handle) => {
                 info!(service = %id, program = %plan.spec.program.display(), "worker started");
-                // `stop_worker` took the handle before, so none is replaced.
+                // `stop_workers` took the handle before, so none is replaced.
                 if let Some(old) = daemon.add_proc(id, handle) {
                     old.cancel.cancel();
                 }
@@ -274,11 +330,25 @@ fn cannot_run(daemon: &Daemon, id: ServiceId, code: &str) {
     }
 }
 
-async fn stop_worker(daemon: &Daemon, id: ServiceId) {
-    if let Some(handle) = daemon.take_proc(id)
-        && let Err(err) = handle.stop().await
-    {
-        warn!(service = %id, %err, "the worker task failed");
+/// Stops the workers `ids` by their stop methods, all at once, so their
+/// waits (up to 30 s for a queue job) overlap instead of adding up. The
+/// handles stay in `Daemon::procs` until each task ends, so a shutdown that
+/// comes meanwhile still waits for their stop.
+async fn stop_workers(daemon: &Daemon, ids: &[ServiceId]) {
+    let asked: Vec<ServiceId> = ids
+        .iter()
+        .copied()
+        .filter(|id| daemon.cancel_proc(*id))
+        .collect();
+    while asked.iter().any(|id| daemon.proc_alive(*id)) {
+        tokio::time::sleep(STOP_POLL).await;
+    }
+    for id in asked {
+        if let Some(handle) = daemon.take_proc(id)
+            && let Err(err) = handle.task.await
+        {
+            warn!(service = %id, %err, "the worker task failed");
+        }
     }
 }
 
