@@ -19,6 +19,7 @@ use marsa_core::types::ServiceId;
 use marsa_core::types::{Event, LogLine, ServiceAction, ServiceState, ServiceStatus};
 use serde_json::Value;
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -66,6 +67,9 @@ pub struct CaddyManager {
     /// The sites and PHP pools of the config. [`CaddyManager::apply`] sets
     /// them; `start` writes the config of the latest ones.
     wanted: Mutex<Wanted>,
+    /// Where the dump server listens, while it does: the next config sends
+    /// the `dump()` of every PHP site there (ADR 0027). [`CaddyManager::set_dumps`].
+    dumps: Mutex<Option<SocketAddr>>,
     /// Held while a config goes to Caddy: by each `apply`, and by `start`
     /// from writing `caddy.json` until Caddy is ready. So configs reach
     /// Caddy in order, and never a Caddy that is still starting. A tokio
@@ -104,6 +108,7 @@ impl CaddyManager {
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(ServiceId::Caddy))),
             busy: Arc::default(),
             wanted: Mutex::default(),
+            dumps: Mutex::default(),
             pushing: tokio::sync::Mutex::default(),
         }
     }
@@ -185,11 +190,30 @@ impl CaddyManager {
         self.push(daemon).await
     }
 
+    /// Where the dump server listens now, or `None`. The next config uses it:
+    /// call [`CaddyManager::reapply`] to send it to a running Caddy. Returns
+    /// whether it changed.
+    pub fn set_dumps(&self, addr: Option<SocketAddr>) -> bool {
+        let mut held = lock(&self.dumps);
+        let changed = *held != addr;
+        *held = addr;
+        changed
+    }
+
+    /// Where the next config sends `dump()`: see [`CaddyManager::set_dumps`].
+    pub fn dumps_target(&self) -> Option<SocketAddr> {
+        *lock(&self.dumps)
+    }
+
     /// The config of the latest sites and pools, with `tag` on `admin`.
     pub(super) fn config(&self, tag: &str) -> Result<Value, CaddyError> {
         let mut config = {
             let wanted = lock(&self.wanted);
-            sites_config(&self.ports(), &wanted.sites, &wanted.pools)?
+            let input = CaddyInput {
+                dumps: *lock(&self.dumps),
+                ..self.ports()
+            };
+            sites_config(&input, &wanted.sites, &wanted.pools)?
         };
         tag_config(&mut config, tag);
         Ok(config)
