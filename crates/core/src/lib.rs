@@ -26,6 +26,7 @@ pub mod recipes;
 pub mod resolver;
 pub mod runtimes;
 pub mod services;
+pub mod sitelog;
 pub mod sites;
 pub mod types;
 

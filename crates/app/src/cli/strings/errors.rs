@@ -432,6 +432,14 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
                 .map_or("This".to_owned(), |name| format!("\"{name}\""))
         ),
         "site_name_taken" => format!("Another folder already has the site name \"{site}\"."),
+        "site_not_laravel" => format!(
+            "\"{site}\" is not a Laravel project (it has no artisan file), so it has no Laravel \
+             log or workers."
+        ),
+        "site_log_unsafe" => format!(
+            "Marsa does not read the log of \"{site}\": its storage/logs leads out of the \
+             project folder, or the log file is a link. Make storage/logs a plain folder."
+        ),
         "site_not_a_folder" => format!(
             "{} is not a folder. Check the path, then try again.",
             shown("The path")
