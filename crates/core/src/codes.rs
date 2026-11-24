@@ -40,6 +40,33 @@ pub const DAEMON_NOT_RUNNING: &str = "daemon_not_running";
 pub const DAEMON_START_FAILED: &str = "daemon_start_failed";
 pub const DAEMON_STOP_FAILED: &str = "daemon_stop_failed";
 pub const DAEMON_UNREACHABLE: &str = "daemon_unreachable";
+/// Another statement of the user's runs on the same database.
+pub const DB_BUSY: &str = "db_busy";
+/// The site has no SQLite file where Marsa looks for one.
+pub const DB_FILE_NOT_FOUND: &str = "db_file_not_found";
+/// The site's SQLite file leads out of the site's folder, or is not a regular file.
+pub const DB_FILE_OUTSIDE_SITE: &str = "db_file_outside_site";
+/// The server has no such database, or it is one of the server's own.
+pub const DB_NOT_FOUND: &str = "db_not_found";
+/// The SQL text holds more than one statement.
+pub const DB_ONE_STATEMENT: &str = "db_one_statement";
+pub const DB_QUERY_CANCELLED: &str = "db_query_cancelled";
+/// The server refused the statement; its message is the error's `detail`.
+pub const DB_QUERY_FAILED: &str = "db_query_failed";
+/// The statement changes data, and the database browser is read-only.
+pub const DB_READ_ONLY: &str = "db_read_only";
+/// A statement's rows were read once already, or kept too long.
+pub const DB_RESULT_GONE: &str = "db_result_gone";
+pub const DB_SERVER_NOT_RUNNING: &str = "db_server_not_running";
+/// The server refused `root` with no password.
+pub const DB_SIGN_IN_FAILED: &str = "db_sign_in_failed";
+/// A source, table, or column name the browser cannot use.
+pub const DB_SOURCE_INVALID: &str = "db_source_invalid";
+pub const DB_SQL_TOO_LONG: &str = "db_sql_too_long";
+pub const DB_TABLE_NOT_FOUND: &str = "db_table_not_found";
+pub const DB_TIMEOUT: &str = "db_timeout";
+/// The server did not answer as expected.
+pub const DB_UNAVAILABLE: &str = "db_unavailable";
 /// The `.test` DNS server is not running, and no failure was recorded.
 pub const DNS_NOT_RUNNING: &str = "dns_not_running";
 /// Another program holds the port where Marsa answers `.test` names.
@@ -93,6 +120,8 @@ pub const INVALID_ID: &str = "invalid_id";
 pub const INVALID_PATH: &str = "invalid_path";
 pub const INVALID_QUERY: &str = "invalid_query";
 pub const INVALID_VERSION: &str = "invalid_version";
+/// Only a running SQL statement of the database browser can be cancelled.
+pub const JOB_NOT_CANCELLABLE: &str = "job_not_cancellable";
 pub const MAIL_ID_INVALID: &str = "mail_id_invalid";
 pub const MAIL_NOT_FOUND: &str = "mail_not_found";
 pub const MAIL_NOT_RUNNING: &str = "mail_not_running";
@@ -324,6 +353,22 @@ pub const ALL: &[&str] = &[
     DAEMON_START_FAILED,
     DAEMON_STOP_FAILED,
     DAEMON_UNREACHABLE,
+    DB_BUSY,
+    DB_FILE_NOT_FOUND,
+    DB_FILE_OUTSIDE_SITE,
+    DB_NOT_FOUND,
+    DB_ONE_STATEMENT,
+    DB_QUERY_CANCELLED,
+    DB_QUERY_FAILED,
+    DB_READ_ONLY,
+    DB_RESULT_GONE,
+    DB_SERVER_NOT_RUNNING,
+    DB_SIGN_IN_FAILED,
+    DB_SOURCE_INVALID,
+    DB_SQL_TOO_LONG,
+    DB_TABLE_NOT_FOUND,
+    DB_TIMEOUT,
+    DB_UNAVAILABLE,
     DNS_NOT_RUNNING,
     DNS_PORT_IN_USE,
     DNS_START_FAILED,
@@ -371,6 +416,7 @@ pub const ALL: &[&str] = &[
     INVALID_PATH,
     INVALID_QUERY,
     INVALID_VERSION,
+    JOB_NOT_CANCELLABLE,
     MAIL_ID_INVALID,
     MAIL_NOT_FOUND,
     MAIL_NOT_RUNNING,
