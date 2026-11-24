@@ -17,7 +17,10 @@ api() {
   if [ -n "$body" ]; then
     args+=(-H 'content-type: application/json' --data "$body")
   fi
-  curl "${args[@]}"
+  local rc=0
+  curl "${args[@]}" || rc=$?
+  rm -f "$headers"
+  return "$rc"
 }
 
 # api_ok METHOD PATH [JSON]: the body of a 2xx answer, or a failure with the

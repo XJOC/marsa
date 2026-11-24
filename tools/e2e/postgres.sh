@@ -195,8 +195,8 @@ jq -e '[.tables[] | select(.table.schema == "public" and .kind == "table") | .ta
 jq -e 'all(.tables[]; .table.schema | startswith("pg_") | not)' <<<"$tables" >/dev/null || fail "a system schema is listed"
 [ "$(api_status POST /v1/db/tables '{"source": {"kind": "server", "server": "postgres", "database": "postgres"}}')" = "404 db_not_found" ] ||
   fail "a system database was opened"
-# One connection for each source (the server's catalog, and app), no pool,
-# each read-only.
+# One connection for each source (the server's catalog, and app), no pool.
+# Each is read-only: the daemon reads the setting back before it uses one.
 others="select count(*) from pg_stat_activity where application_name = 'marsa'"
 [ "$(tcp -U root -d postgres -c "$others")" = 2 ] || fail "$(tcp -U root -d postgres -c "$others") browser connections, not 2"
 api_ok POST /v1/db/close >/dev/null

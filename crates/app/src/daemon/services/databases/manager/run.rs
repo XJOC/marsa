@@ -58,6 +58,8 @@ impl ServerManager {
                 ActionError::ProgramNotAbsolute(err)
             })?;
         *lock(&self.started) = Some(program);
+        // Not ready on any port until this run says so.
+        *lock(&self.ready) = None;
         let ServiceHandle {
             cancel,
             task,

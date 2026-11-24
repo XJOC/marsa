@@ -206,8 +206,9 @@ tables=$(api_ok POST /v1/db/tables '{"source": {"kind": "server", "server": "mys
 [ "$(jq -c '[.tables[] | [.table.name, .kind]]' <<<"$tables")" = '[["migrations","table"],["posts","table"]]' ] || fail "tables: $tables"
 [ "$(api_status POST /v1/db/tables '{"source": {"kind": "server", "server": "mysql", "database": "mysql"}}')" = "404 db_not_found" ] ||
   fail "a system database was opened"
-# One connection for each source (the server's catalog, and app), no pool.
-others="select count(*) from information_schema.processlist where user = 'root' and id <> connection_id()"
+# One connection for each source (the server's catalog, and app), no pool,
+# both over TCP: the socket's root would show `localhost` as its host.
+others="select count(*) from information_schema.processlist where user = 'root' and host like '127.0.0.1:%' and id <> connection_id()"
 [ "$(tcp -e "$others")" = 2 ] || fail "$(tcp -e "$others") browser connections, not 2"
 api_ok POST /v1/db/close >/dev/null
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -215,6 +216,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.5
 done
 [ "$(tcp -e "$others")" = 0 ] || fail "a browser connection stayed open after close"
+# root over TCP with a password: the browser says so, and asks nothing else.
+sock -e "alter user 'root'@'127.0.0.1' identified by 'e2e-secret'"
+problem=$(api_ok GET /v1/db/sources | jq -r '.servers[] | select(.server == "mysql") | .problem')
+sock -e "alter user 'root'@'127.0.0.1' identified by ''"
+[ "$problem" = db_sign_in_failed ] || fail "with a password for root: $problem"
+api_ok POST /v1/db/close >/dev/null
 
 step "the running version cannot be uninstalled; its databases stay"
 refused 'in use' marsa uninstall mysql "$VERSION"

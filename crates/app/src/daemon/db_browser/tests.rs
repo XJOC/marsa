@@ -9,6 +9,8 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection};
 use tempfile::TempDir;
 
+use marsa_core::types::DbServer;
+
 use super::sqlite;
 use crate::daemon::http::test_router::TestRouter;
 use crate::daemon::state::Daemon;
@@ -458,4 +460,99 @@ async fn the_log_holds_no_name_or_value_from_the_database() {
     connection.close().await.unwrap();
     let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(log.contains("SELECT count(*) FROM secret_table_x"), "{log}");
+}
+
+/// A server's stop closes the browser's connections to it first, and keeps
+/// the others.
+#[tokio::test]
+async fn a_server_stop_closes_its_browser_sources_first() {
+    let app = App::new();
+    let store = &app.daemon.db_browser().store;
+    store.slot(&(DbServer::Mysql, Some("shop".to_owned())));
+    store.slot(&(DbServer::Mysql, None));
+    store.slot(&(DbServer::Postgres, Some("app".to_owned())));
+    let (status, json) = app
+        .router
+        .answer("POST", "/v1/services/mysql/stop", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(store.open(), [(DbServer::Postgres, Some("app".to_owned()))]);
+}
+
+/// What a server's error becomes: its text goes to `detail` only.
+mod server_errors {
+    use std::borrow::Cow;
+    use std::error::Error as StdError;
+    use std::fmt;
+
+    use sqlx::error::{DatabaseError, ErrorKind};
+
+    use super::super::servers::db_error;
+
+    #[derive(Debug)]
+    struct Fake(&'static str);
+
+    impl fmt::Display for Fake {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("the server's own words")
+        }
+    }
+
+    impl StdError for Fake {}
+
+    impl DatabaseError for Fake {
+        fn message(&self) -> &str {
+            "the server's own words"
+        }
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.0))
+        }
+        fn as_error(&self) -> &(dyn StdError + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn StdError + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn StdError + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+    }
+
+    fn mapped(code: &'static str) -> (u16, &'static str, String, String) {
+        let err = db_error(sqlx::Error::Database(Box::new(Fake(code))));
+        (
+            err.status.as_u16(),
+            err.code,
+            err.message,
+            err.detail.unwrap_or_default(),
+        )
+    }
+
+    #[test]
+    fn a_refused_sign_in_is_its_own_code() {
+        for code in ["28P01", "28000"] {
+            let (status, code, message, detail) = mapped(code);
+            assert_eq!((status, code), (502, "db_sign_in_failed"));
+            assert!(!message.contains("own words"), "{message}");
+            assert!(detail.contains("own words"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn the_servers_time_limit_is_a_timeout() {
+        let (status, code, _, detail) = mapped("57014");
+        assert_eq!((status, code), (504, "db_timeout"));
+        assert!(detail.contains("own words"), "{detail}");
+    }
+
+    #[test]
+    fn any_other_failure_is_unavailable_with_the_reason() {
+        let (status, code, message, detail) = mapped("42P01");
+        assert_eq!((status, code), (502, "db_unavailable"));
+        assert_eq!(message, "the database could not be read");
+        assert!(detail.contains("own words"), "{detail}");
+    }
 }

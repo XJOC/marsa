@@ -69,6 +69,9 @@ pub struct ServerManager {
     /// The program of the last start, so an uninstall never deletes the
     /// version that runs. Use [`ServerManager::running_program`].
     started: Mutex<Option<PathBuf>>,
+    /// The port of the last start, once the server took connections there;
+    /// `None` from the spawn until then. Use [`ServerManager::ready_port`].
+    ready: Mutex<Option<u16>>,
     /// The status and recent lines, kept across runs, so `seq` never goes
     /// back and the lines of a failed run stay readable.
     runtime: Arc<Mutex<ServiceRuntime>>,
@@ -97,6 +100,7 @@ impl ServerManager {
             orphan_ladder: kind.stop(),
             elevated: marsa_core::platform::is_elevated,
             started: Mutex::default(),
+            ready: Mutex::default(),
             starting: Mutex::default(),
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(ServiceId::Database(kind)))),
             busy: Arc::default(),
@@ -178,14 +182,15 @@ impl ServerManager {
         self.status().state != ServiceState::Stopped || any_installed(self.kind, data_dir)
     }
 
-    /// The port the server listens on: the one `global.toml` sets, or the
-    /// server's own. The database browser connects to it, and a stop looks
-    /// for our old server on it.
-    pub fn port(&self, data_dir: &Path) -> u16 {
-        read_settings(self.kind, data_dir)
-            .ok()
-            .and_then(|settings| settings.port)
-            .unwrap_or(self.kind.default_port())
+    /// The port where the server this daemon runs took connections, or
+    /// `None` while it does not run or is not ready. Not `global.toml`'s:
+    /// that file can change, or fail to read, while the server runs, and the
+    /// database browser must never ask another program on another port.
+    pub fn ready_port(&self, daemon: &Daemon) -> Option<u16> {
+        if !daemon.proc_alive(ServiceId::Database(self.kind)) {
+            return None;
+        }
+        *lock(&self.ready)
     }
 
     /// The version a start runs, as the database browser lists it; `None`
@@ -408,6 +413,7 @@ impl ServerManager {
             Ready::Yes => {
                 let server = self.kind.id();
                 info!(port, server, "it takes connections");
+                *lock(&self.ready) = Some(port);
                 // The record comes first, so a crash of `marsad` once a
                 // start said "running" leaves the server recorded.
                 let settled = orphan::settled(recorded).await;
@@ -471,7 +477,10 @@ impl ServerManager {
         let Some(platform) = self.platform else {
             return;
         };
-        let port = self.port(daemon.data_dir());
+        let port = read_settings(kind, daemon.data_dir())
+            .ok()
+            .and_then(|settings| settings.port)
+            .unwrap_or(kind.default_port());
         let servers = installed_servers(kind, daemon.data_dir(), platform);
         let ladder = &self.orphan_ladder;
         let probes = &*self.probes;

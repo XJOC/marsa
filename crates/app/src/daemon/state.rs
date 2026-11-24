@@ -281,13 +281,13 @@ impl Daemon {
     }
 
     /// The database browser, made now if no request made it yet.
-    pub fn db_browser(&self) -> &Browser {
+    pub(crate) fn db_browser(&self) -> &Browser {
         self.db_browser.get_or_init(Browser::default)
     }
 
     /// The database browser, if a request made it: what closes it needs no
     /// new one.
-    pub fn open_db_browser(&self) -> Option<&Browser> {
+    pub(crate) fn open_db_browser(&self) -> Option<&Browser> {
         self.db_browser.get()
     }
 

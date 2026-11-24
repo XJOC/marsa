@@ -60,7 +60,7 @@ const IDLE: Duration = Duration::from_secs(60);
 /// What the browser keeps in `marsad`: its server connections
 /// ([`store`]). Made by the first request that needs one, so an idle
 /// `marsad` holds nothing of it. SQLite files are never kept open.
-pub struct Browser {
+pub(crate) struct Browser {
     store: Arc<store::Store<servers::Conn>>,
 }
 
@@ -91,13 +91,13 @@ impl Browser {
     }
 
     /// Closes the connections to `kind`, before it stops.
-    pub fn close_server(&self, kind: ServerKind) {
+    pub(crate) fn close_server(&self, kind: ServerKind) {
         if let Some(server) = DbServer::ALL.into_iter().find(|s| s.kind() == kind) {
             self.store.close_server(server);
         }
     }
 
-    pub fn close_all(&self) {
+    pub(crate) fn close_all(&self) {
         self.store.close_all();
     }
 }
@@ -154,7 +154,7 @@ async fn server_info(
     };
     let state = manager.status().state;
     let (databases, problem) = if state == ServiceState::Running {
-        match servers::with(daemon, server, None, servers::databases).await {
+        match within(servers::with(daemon, server, None, servers::databases)).await {
             Ok(names) => (
                 names.into_iter().map(|name| DbDatabase { name }).collect(),
                 None,
@@ -186,9 +186,14 @@ async fn tables(
             let file = sqlite::site_file(&daemon, site).await?;
             within(sqlite::tables(file)).await?
         }
+        // One limit for the whole request: the wait for the source, two
+        // connections, and their reads.
         DbSource::Server { server, database } => {
-            let database = listed_database(&daemon, *server, database).await?;
-            servers::with(&daemon, *server, Some(database), servers::tables).await?
+            within(async {
+                let database = listed_database(&daemon, *server, database).await?;
+                servers::with(&daemon, *server, Some(database), servers::tables).await
+            })
+            .await?
         }
     };
     log(&source, "tables", started, tables.tables.len());
@@ -245,8 +250,10 @@ async fn within<T>(work: impl Future<Output = Result<T, HttpError>>) -> Result<T
 
 /// The one log line of a request: what the ADR allows, and nothing more.
 fn log(source: &DbSource, request: &'static str, started: Instant, rows: usize) {
+    // A database's name may hold a line break: escaped, it cannot forge a
+    // line of the log.
     info!(
-        source = %source,
+        source = %source.to_string().escape_debug(),
         request,
         elapsed_ms = elapsed_ms(started),
         rows,
