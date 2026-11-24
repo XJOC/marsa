@@ -4,6 +4,14 @@
 //! The file is opened for each request and closed after it. An open handle
 //! would stop the user from deleting or replacing the file on Windows, and
 //! could hold back a WAL checkpoint of the site's own connections.
+//!
+//! The database file itself is never written or created. A database in WAL
+//! mode is the one exception around it: SQLite makes its `-wal` and `-shm`
+//! files beside it when they are missing, even for a read-only connection,
+//! and that connection cannot remove them, because removing them needs a
+//! checkpoint, which writes. They hold no data of their own, and the site's
+//! app uses or removes them at its next open. Not making them would need
+//! `immutable`, which reads torn pages while the app writes.
 
 use std::fs;
 use std::io;
@@ -18,7 +26,7 @@ use marsa_core::types::{DbSiteFile, DbTables, SiteList};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection};
 
-use super::{catalog, site_list, unavailable};
+use super::{catalog, unavailable};
 use crate::daemon::http::routes::HttpError;
 use crate::daemon::state::Daemon;
 
@@ -38,7 +46,7 @@ pub(super) fn files(list: &SiteList) -> Vec<DbSiteFile> {
 pub(super) async fn site_file(daemon: &Arc<Daemon>, name: &str) -> Result<PathBuf, HttpError> {
     validate_name(name)
         .map_err(|err| HttpError::new(StatusCode::BAD_REQUEST, err.code(), err.to_string()))?;
-    let list = site_list(daemon).await?;
+    let list = daemon.site_list().await?;
     let root = list
         .sites
         .iter()
@@ -54,6 +62,11 @@ pub(super) async fn site_file(daemon: &Arc<Daemon>, name: &str) -> Result<PathBu
 /// `root`'s SQLite file, if it is a regular file inside `root` once every
 /// link is followed. The paths are made canonical only to compare them: the
 /// path opened is the plain one (architecture.md section 10).
+///
+/// The driver opens the file by its path later, so a link swapped in
+/// between is followed. That is accepted: the swap needs the right to write
+/// in the site's folder, the open is read-only, and the answer goes only to
+/// the same user, who holds the token.
 fn checked_file(root: &Path) -> Result<PathBuf, HttpError> {
     let path = db_browser::sqlite_file(root);
     let not_found = || {
@@ -65,8 +78,17 @@ fn checked_file(root: &Path) -> Result<PathBuf, HttpError> {
     };
     let metadata = match fs::metadata(&path) {
         Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Err(not_found()),
-        Err(_) => return Err(outside()),
+        // `NotADirectory`: `database` is a file.
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Err(not_found());
+        }
+        // Permission denied, for one: the system's words carry no path.
+        Err(err) => return Err(unavailable(err.to_string())),
     };
     let inside = match (fs::canonicalize(&path), fs::canonicalize(root)) {
         (Ok(file), Ok(root)) => file.starts_with(root),
@@ -90,11 +112,23 @@ fn outside() -> HttpError {
 /// Opens `file` for reading only. It is never made if it is missing, and
 /// nothing the browser does is logged by the driver: its statement log
 /// would hold SQL text.
+///
+/// The file may come with a project cloned from anywhere, so the schema is
+/// not trusted (its views and triggers cannot call functions with side
+/// effects), and each page's cells are checked before they are read.
 pub(super) async fn open(file: &Path) -> Result<SqliteConnection, HttpError> {
+    // The driver opens with SQLite's URI flag: a relative name such as
+    // `file:x?mode=rw` would be read as a URI with its own options. The site
+    // list holds absolute folders only, so this never fires.
+    if !file.is_absolute() {
+        return Err(unavailable("the SQLite path is not absolute".to_owned()));
+    }
     SqliteConnectOptions::new()
         .filename(file)
         .read_only(true)
         .create_if_missing(false)
+        .pragma("trusted_schema", "OFF")
+        .pragma("cell_size_check", "ON")
         .disable_statement_logging()
         .connect()
         .await

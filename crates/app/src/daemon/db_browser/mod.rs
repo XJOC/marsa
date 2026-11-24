@@ -9,7 +9,7 @@
 //!
 //! | Error | When |
 //! | --- | --- |
-//! | 400 `invalid_body` | the body is not the request type; a field it does not know (`host`, `path`) is refused |
+//! | 400, 415, or 422 `invalid_body` | the body is not JSON of the request type (axum's status); a field it does not know, such as `host` or `path`, is 422 |
 //! | 400 `site_name_invalid` | the site's name cannot be a site's |
 //! | 404 `site_not_found` | no site has that name |
 //! | 404 `db_file_not_found` | the site has no SQLite file; none is made |
@@ -35,7 +35,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa_core::codes;
-use marsa_core::types::{DbSource, DbSources, DbTables, DbTablesRequest, ServiceState, SiteList};
+use marsa_core::types::{DbSource, DbSources, DbTables, DbTablesRequest, ServiceState};
 use tracing::info;
 
 use crate::daemon::http::Rejected;
@@ -56,7 +56,7 @@ pub fn routes() -> Router<Arc<Daemon>> {
 
 async fn sources(State(daemon): State<Arc<Daemon>>) -> Result<Json<DbSources>, HttpError> {
     let started = Instant::now();
-    let list = site_list(&daemon).await?;
+    let list = daemon.site_list().await?;
     let files =
         crate::daemon::http::blocking("db sources", move || Ok(sqlite::files(&list))).await?;
     info!(
@@ -109,16 +109,9 @@ async fn close() -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-/// The site list, built first if the daemon has none yet.
-async fn site_list(daemon: &Arc<Daemon>) -> Result<SiteList, HttpError> {
-    match daemon.sites() {
-        Some(list) => Ok(list),
-        None => Ok(daemon.rebuild_sites().await?),
-    }
-}
-
 /// `work`, or `db_timeout` after [`REQUEST_LIMIT`]. A connection the work
-/// held is dropped with it, which closes it.
+/// held is dropped with it. A SQLite statement that runs then still ends on
+/// the driver's own thread first: the driver does not interrupt it on drop.
 async fn within<T>(work: impl Future<Output = Result<T, HttpError>>) -> Result<T, HttpError> {
     tokio::time::timeout(REQUEST_LIMIT, work)
         .await

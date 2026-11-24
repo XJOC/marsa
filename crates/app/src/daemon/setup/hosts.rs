@@ -168,11 +168,7 @@ async fn work(
 /// The host names of the daemon's sites, from the list `GET /v1/sites`
 /// gives: built now if there is none yet, with that route's errors.
 async fn site_names(daemon: &Arc<Daemon>) -> Result<Vec<String>, HttpError> {
-    let list = match daemon.sites() {
-        Some(list) => list,
-        None => daemon.rebuild_sites().await?,
-    };
-    Ok(names_of(&list))
+    Ok(names_of(&daemon.site_list().await?))
 }
 
 /// [`linux_dns::status`] for `names`. Blocking: it reads the hosts file.

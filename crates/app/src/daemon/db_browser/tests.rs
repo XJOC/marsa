@@ -146,8 +146,56 @@ async fn the_browser_never_writes_the_file() {
     assert!(err.to_string().contains("not authorized"), "{err}");
     connection.close().await.unwrap();
 
-    app.tables(blog()).await;
+    let (status, json) = app.tables(blog()).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(fs::read(&file).unwrap(), before);
+}
+
+/// The names in `folder`, sorted.
+fn listing(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A database in WAL mode: its bytes stay the same, and the only new files
+/// are SQLite's `-wal` (empty) and `-shm`, which a read-only connection
+/// makes and cannot remove.
+#[tokio::test]
+async fn a_wal_database_keeps_its_bytes_and_gets_only_its_sidecars() {
+    let app = App::new();
+    let root = app.site("blog").await;
+    let file = make_file(
+        &root,
+        "PRAGMA journal_mode = WAL; CREATE TABLE users (id INTEGER PRIMARY KEY);",
+    )
+    .await;
+    let folder = file.parent().unwrap();
+    // The app closed its last connection, which removed its WAL files.
+    assert_eq!(listing(folder), ["database.sqlite"]);
+    let before = fs::read(&file).unwrap();
+
+    let (status, json) = app.tables(blog()).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(fs::read(&file).unwrap(), before);
+    for name in listing(folder) {
+        assert!(
+            [
+                "database.sqlite",
+                "database.sqlite-shm",
+                "database.sqlite-wal"
+            ]
+            .contains(&name.as_str()),
+            "{name}"
+        );
+    }
+    let wal = folder.join("database.sqlite-wal");
+    if wal.exists() {
+        assert_eq!(fs::metadata(&wal).unwrap().len(), 0);
+    }
 }
 
 #[tokio::test]
@@ -161,6 +209,17 @@ async fn a_missing_file_is_not_made() {
 
     let (_, json) = app.router.answer("GET", "/v1/db/sources", None).await;
     assert_eq!(json["files"], json!([]));
+
+    // The open itself never makes the file either: it guards the moment
+    // between the check and the open.
+    let missing = root.join("missing.sqlite");
+    let err = sqlite::open(&missing).await.unwrap_err();
+    assert_eq!(err.code, "db_unavailable");
+    assert!(!missing.exists());
+    let relative = sqlite::open(Path::new("database.sqlite"))
+        .await
+        .unwrap_err();
+    assert_eq!(relative.code, "db_unavailable");
 }
 
 #[tokio::test]
@@ -337,4 +396,20 @@ async fn the_log_holds_no_name_or_value_from_the_database() {
     ] {
         assert!(!log.contains(secret), "{secret} is in the log: {log}");
     }
+
+    // The control: this capture does see the driver's statement log, from a
+    // connection that keeps the driver's default.
+    let mut connection = SqliteConnectOptions::new()
+        .filename(root.join("database").join("database.sqlite"))
+        .read_only(true)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::query("SELECT count(*) FROM secret_table_x")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("SELECT count(*) FROM secret_table_x"), "{log}");
 }

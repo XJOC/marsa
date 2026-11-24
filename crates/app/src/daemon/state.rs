@@ -275,6 +275,20 @@ impl Daemon {
         state.sites.clone()
     }
 
+    /// The site list of the last build, or a new build if there is none yet
+    /// (see [`Self::rebuild_sites`]).
+    ///
+    /// # Errors
+    ///
+    /// A [`SitesError`] if the list must be built and `sites.toml` cannot be
+    /// read.
+    pub async fn site_list(self: &Arc<Self>) -> Result<SiteList, SitesError> {
+        match self.sites() {
+            Some(list) => Ok(list),
+            None => self.rebuild_sites().await,
+        }
+    }
+
     /// Changes `sites.toml` and builds the site list again.
     ///
     /// On a blocking thread, one job at a time: reads the file, lets `edit`

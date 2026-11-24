@@ -535,18 +535,15 @@ async fn run(
 /// `GET /v1/sites` gives: built now if there is none yet. `None` if it
 /// cannot be built (`sites.toml` cannot be read, say).
 pub(super) async fn host_names(daemon: &Arc<Daemon>) -> Option<Vec<String>> {
-    let list = match daemon.sites() {
-        Some(list) => list,
-        None => match daemon.rebuild_sites().await {
-            Ok(list) => list,
-            Err(err) => {
-                tracing::warn!(
-                    code = err.code(),
-                    "no site list, so no names for the hosts file"
-                );
-                return None;
-            }
-        },
+    let list = match daemon.site_list().await {
+        Ok(list) => list,
+        Err(err) => {
+            tracing::warn!(
+                code = err.code(),
+                "no site list, so no names for the hosts file"
+            );
+            return None;
+        }
     };
     Some(names_of(&list))
 }

@@ -27,8 +27,8 @@ env:
   CARGO_TERM_COLOR: always
   # The last commit of main before sqlx: the baseline of the budget.
   BASELINE: b5d82b5c319c4b9537bec5ced9767194560a8a74
-  # 6 MB, as the budget says.
-  MAX_GROWTH: 6291456
+  # The budget's 6 MB, read the strict way: 6,000,000 bytes.
+  MAX_GROWTH: 6000000
 
 defaults:
   run:
@@ -67,7 +67,8 @@ jobs:
         run: |
           failed=0
           for package in marsa-gui marsa-shim; do
-            tree="$(cargo tree -p "$package" -e normal)"
+            # Every target, so a dependency only for Windows or macOS counts.
+            tree="$(cargo tree -p "$package" -e normal --target all)"
             if grep -q sqlx <<<"$tree"; then
               echo "FAIL: sqlx in $package"
               failed=1
