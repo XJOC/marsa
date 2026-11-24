@@ -25,6 +25,7 @@ use super::super::settings::read_settings;
 use super::super::{mailpit, mysql, orphan, postgres, valkey};
 use super::run::Refusal;
 use super::{ActionError, ServerManager};
+use crate::daemon::services::pid_record::{self, Cleared};
 use crate::daemon::services::supervisor::lock;
 use crate::daemon::state::Daemon;
 
@@ -67,27 +68,16 @@ impl ServerManager {
         let servers = installed_servers(kind, daemon.data_dir(), platform);
         let ladder = &self.orphan_ladder;
         let probes = &*self.probes;
-        let looks = orphan::START_LOOKS;
-        let cleared = orphan::clear(
-            kind,
-            probes,
-            daemon.data_dir(),
-            &servers,
-            ladder,
-            port,
-            looks,
-        );
+        let looks = pid_record::START_LOOKS;
+        let owner = orphan::owner(kind, daemon.data_dir(), port);
+        let cleared = pid_record::clear(&owner, probes, &servers, ladder, looks);
         match cleared.await {
-            Ok(orphan::Cleared::Stopped { pid, signal }) => {
+            Ok(Cleared::Stopped { pid, signal }) => {
                 let text = orphan::stopped_line(kind, pid, signal);
                 lock(&self.runtime).note(daemon.events(), &text);
             }
-            Ok(
-                orphan::Cleared::Nothing
-                | orphan::Cleared::Forgotten
-                | orphan::Cleared::Unknown { .. },
-            ) => {}
-            Err(orphan::Stuck(reason)) => return Err(ActionError::OrphanStuck(kind, reason)),
+            Ok(Cleared::Nothing | Cleared::Forgotten | Cleared::Unknown { .. }) => {}
+            Err(pid_record::Stuck(reason)) => return Err(ActionError::OrphanStuck(kind, reason)),
         }
         let chosen = Chosen {
             platform,
@@ -247,7 +237,7 @@ impl ServerManager {
     /// [`Self::prepare`] for Valkey: `valkey.conf`, and the check of its
     /// port. Valkey has no pid file of its own and no lock on its data
     /// folder, so the port is the whole check, after our own record of its
-    /// pid ([`orphan::clear`]). A program that holds the port, Homebrew's
+    /// pid ([`pid_record::clear`]). A program that holds the port, Homebrew's
     /// Redis or Herd's, refuses the start with its name. No first init:
     /// Valkey starts on an empty folder.
     async fn prepare_valkey(
@@ -284,7 +274,7 @@ impl ServerManager {
     /// [`Self::prepare`] for Mailpit: the check of both its ports, SMTP and
     /// the web page, then its mail folder. Mailpit has no pid file of its own
     /// and no lock, so the ports are the whole check, after our own record of
-    /// its pid ([`orphan::clear`]). Another mail catcher on either port
+    /// its pid ([`pid_record::clear`]). Another mail catcher on either port
     /// (Herd's, Docker's) refuses the start with its name.
     async fn prepare_mailpit(
         &self,

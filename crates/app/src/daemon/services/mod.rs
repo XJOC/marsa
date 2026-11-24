@@ -7,6 +7,7 @@ pub mod caddy;
 pub mod databases;
 pub mod dns;
 pub mod php;
+pub mod pid_record;
 pub mod probe;
 pub mod runtime;
 pub mod supervisor;

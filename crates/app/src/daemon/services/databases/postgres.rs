@@ -195,7 +195,7 @@ pub(super) async fn answers(port: u16) -> bool {
 ///
 /// Only read once the run has ended: a line never stops a server. That
 /// process gets no signal, and `postmaster.pid` stays: the pid may be
-/// another program's now (`orphan::clear` handles our own).
+/// another program's now (`pid_record::clear` handles our own).
 pub(super) async fn lock_refusal(
     probes: &dyn ProcessProbe,
     stderr: &[&str],
