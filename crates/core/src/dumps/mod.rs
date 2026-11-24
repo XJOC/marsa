@@ -14,6 +14,10 @@ use crate::types::Dump;
 
 pub use render::{MAX_TEXT_BYTES, MAX_TEXT_LINES};
 
+/// The port of the dump server, as Symfony's `VAR_DUMPER_SERVER` default
+/// (`php artisan dump-server` uses it too). Loopback only.
+pub const DUMPS_PORT: u16 = 9912;
+
 /// A line over this many bytes is not read. The listener skips it up to the
 /// next line break, without keeping it.
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;

@@ -188,6 +188,10 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
             "A download is larger than allowed. Nothing was installed. Report it."
         }
         "dump_invalid" => "A dump that PHP sent could not be read, so it was dropped.",
+        "dumps_port_in_use" => {
+            "Another program uses port 9912, so dump() stays in the page. Stop it, then turn \
+             dump capture off and on again."
+        }
         "dump_too_large" => "A dump was too large to keep, so only this note was saved.",
         "download_io" => {
             "Cannot save a download in the data folder. Check the free disk space and the \

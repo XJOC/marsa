@@ -42,6 +42,24 @@ pub struct GlobalConfig {
     /// fixed ([`crate::databases::mailpit::MAILPIT_UI_PORT`]).
     #[serde(skip_serializing_if = "is_default")]
     pub mailpit: ServerSettings,
+    /// `dump()` in the window (ADR 0027).
+    #[serde(skip_serializing_if = "is_default")]
+    pub dumps: DumpsSettings,
+}
+
+/// The `[dumps]` table in `global.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DumpsSettings {
+    /// The dump server listens, and every PHP site sends its `dump()` to it.
+    /// On by default, so the file only says `enabled = false`.
+    pub enabled: bool,
+}
+
+impl Default for DumpsSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// The `[php]` or `[node]` table in `global.toml`. One table per tool leaves
@@ -488,6 +506,7 @@ mod tests {
             mysql: ServerSettings::default(),
             valkey: ServerSettings::default(),
             mailpit: ServerSettings::default(),
+            dumps: DumpsSettings::default(),
         }
     }
 

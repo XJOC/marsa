@@ -2,6 +2,7 @@
 //! (architecture.md section 5). One file per job.
 
 pub mod autostart;
+pub mod dumps;
 pub mod http;
 pub mod jobs;
 pub mod mail;

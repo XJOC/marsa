@@ -465,3 +465,29 @@ fn random_lines_never_panic() {
         let _ = parse_line(base64(&noise).as_bytes());
     }
 }
+
+#[test]
+fn dumps_are_on_unless_global_toml_says_off() {
+    use crate::config::{GlobalConfig, parse_global};
+
+    let path = Path::new("global.toml");
+    assert!(parse_global("", path).expect("empty").dumps.enabled);
+    assert!(
+        parse_global("[dumps]\n", path)
+            .expect("empty table")
+            .dumps
+            .enabled
+    );
+    let off = parse_global("[dumps]\nenabled = false\n", path).expect("off");
+    assert!(!off.dumps.enabled);
+    // The default is not written; "off" is, and reads back.
+    let default = toml::to_string(&GlobalConfig::default()).expect("toml");
+    assert!(!default.contains("dumps"), "{default}");
+    let text = toml::to_string(&off).expect("toml");
+    assert!(
+        text.contains("[dumps]") && text.contains("enabled = false"),
+        "{text}"
+    );
+    assert_eq!(parse_global(&text, path).expect("back"), off);
+    assert!(parse_global("[dumps]\nport = 1\n", path).is_err());
+}
