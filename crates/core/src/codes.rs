@@ -286,6 +286,8 @@ pub const VERSION_NOT_INSTALLED: &str = "version_not_installed";
 pub const WORKER_FAILED: &str = "worker_failed";
 /// A worker runs while its site's setting asks for it (`marsa queue on|off`), not by a service action.
 pub const WORKER_FOLLOWS_SITE: &str = "worker_follows_site";
+/// A worker that a crashed daemon left running did not stop, so a new one does not start.
+pub const WORKER_ORPHAN_STUCK: &str = "worker_orphan_stuck";
 pub const XDEBUG_INTERRUPTED: &str = "xdebug_interrupted";
 
 /// Every code above, in alphabetical order.
@@ -554,6 +556,7 @@ pub const ALL: &[&str] = &[
     VERSION_NOT_INSTALLED,
     WORKER_FAILED,
     WORKER_FOLLOWS_SITE,
+    WORKER_ORPHAN_STUCK,
     XDEBUG_INTERRUPTED,
 ];
 

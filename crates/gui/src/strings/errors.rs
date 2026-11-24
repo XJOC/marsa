@@ -54,6 +54,9 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
         "worker_failed" => {
             "This worker crashed again and again, so Marsa stopped it. Its log says why."
         }
+        "worker_orphan_stuck" => {
+            "The worker an earlier Marsa left running did not stop, so a new one did not start."
+        }
         "worker_follows_site" => {
             "This worker runs while its site asks for it: use the site's switch."
         }

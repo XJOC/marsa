@@ -50,6 +50,11 @@ pub const FPM_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os = 
 /// with the daemon (ADR 0017).
 pub const DATABASE_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os = "linux"));
 
+/// The same for a site's worker (`php artisan queue:work`): a PHP CLI that
+/// lives on after a SIGKILL of the daemon and keeps taking the site's jobs.
+/// On Windows the Job Object ends it with the daemon (ADR 0017).
+pub const WORKER_ORPHAN_RECOVERY: bool = cfg!(any(target_os = "macos", target_os = "linux"));
+
 /// How long `kill`, `ps`, or `lsof` may run.
 #[cfg(unix)]
 const TOOL_LIMIT: Duration = Duration::from_secs(2);

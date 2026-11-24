@@ -286,7 +286,16 @@ mod real {
         let worker_failed = |s: &ServiceStatus| matches!(&s.state, ServiceState::Failed { code } if code == codes::WORKER_FAILED);
         let failed = wait_for(&daemon, worker_failed).await;
         assert_eq!(failed.restarts, 2);
-        assert!(!daemon.proc_alive(queue()));
+        // The task ends a moment after its last state: the record of the
+        // run is taken down first.
+        let ended = async {
+            while daemon.proc_alive(queue()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(WAIT, ended)
+            .await
+            .expect("the task ended");
 
         // A pass does not start it again.
         fs::remove_file(root.join("fail")).unwrap();

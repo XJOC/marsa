@@ -35,7 +35,12 @@ use marsa_core::workers::{self, WorkerPaths, worker_spec};
 use tracing::{info, warn};
 
 use crate::daemon::services::php;
+use crate::daemon::services::probe::{ProcessProbe, SystemProbe};
 use crate::daemon::services::supervisor::{ServiceRuntime, Supervisor, lock};
+
+mod orphan;
+
+use self::orphan::Before;
 use crate::daemon::state::Daemon;
 
 /// The statuses and recent lines of the workers that are wanted now, for
@@ -217,6 +222,8 @@ pub struct WorkerManager {
     running: BTreeMap<ServiceId, Plan>,
     /// `workers::RESTART`; the tests make it short.
     restart: RestartPolicy,
+    /// Who runs under a pid, and signals, for the orphan check.
+    probes: Arc<dyn ProcessProbe>,
 }
 
 impl WorkerManager {
@@ -226,6 +233,7 @@ impl WorkerManager {
             platform,
             running: BTreeMap::new(),
             restart: workers::RESTART,
+            probes: Arc::new(SystemProbe),
         }
     }
 
@@ -292,17 +300,37 @@ impl WorkerManager {
             return;
         }
         for (id, plan) in start {
-            if self.start(daemon, plan) {
+            if self.start(daemon, plan).await {
                 self.running.insert(id, plan.clone());
             }
         }
     }
 
-    /// Starts the worker under the supervisor. `false` if it cannot start:
-    /// its status then says why.
-    fn start(&self, daemon: &Daemon, plan: &Plan) -> bool {
+    /// Starts the worker under the supervisor, after the orphan check.
+    /// `false` if it cannot start: its status then says why.
+    async fn start(&self, daemon: &Daemon, plan: &Plan) -> bool {
         let id = plan.spec.id;
         let runtime = daemon.workers().runtime(id);
+        let before = orphan::clear(
+            &*self.probes,
+            &self.data_dir,
+            self.platform,
+            id,
+            &plan.spec.stop,
+        );
+        match before.await {
+            Before::Clear => {}
+            Before::Note(text) => lock(&runtime).note(daemon.events(), &text),
+            Before::Stuck(text) => {
+                warn!(service = %id, "the worker was not started: its old run did not stop");
+                let mut runtime = lock(&runtime);
+                runtime.note(daemon.events(), &text);
+                runtime.set_failed(daemon.events(), orphan::STUCK);
+                return false;
+            }
+        }
+        // Before the spawn, so the record of the run does not miss its pid.
+        let lines = daemon.events().subscribe();
         let mut spec = plan.spec.clone();
         spec.restart = self.restart;
         let logs_dir = DataDir::new(daemon.data_dir()).logs();
@@ -310,6 +338,9 @@ impl WorkerManager {
         match Supervisor::spawn_on(spec, events, &logs_dir, Arc::clone(&runtime)) {
             Ok(handle) => {
                 info!(service = %id, program = %plan.spec.program.display(), "worker started");
+                let program = plan.spec.program.clone();
+                let probes = Arc::clone(&self.probes);
+                let handle = orphan::record(handle, lines, daemon.data_dir(), program, probes);
                 // `stop_workers` took the handle before, so none is replaced.
                 if let Some(old) = daemon.add_proc(id, handle) {
                     old.cancel.cancel();
