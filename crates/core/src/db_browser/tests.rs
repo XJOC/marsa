@@ -175,6 +175,24 @@ fn the_catalog_statements_of_each_engine() {
 }
 
 #[test]
+fn the_catalog_statements_of_each_engine() {
+    let catalog = |engine: Engine, server: Option<DbServer>| {
+        let mut lines: Vec<&str> = server.into_iter().map(databases_sql).collect();
+        lines.extend([tables_sql(engine), columns_sql(engine)]);
+        lines.join("\n")
+    };
+    insta::assert_snapshot!(
+        "catalog_mysql",
+        catalog(Engine::Mysql, Some(DbServer::Mysql))
+    );
+    insta::assert_snapshot!(
+        "catalog_postgres",
+        catalog(Engine::Postgres, Some(DbServer::Postgres))
+    );
+    insta::assert_snapshot!("catalog_sqlite", catalog(Engine::Sqlite, None));
+}
+
+#[test]
 fn a_bad_name_anywhere_stops_the_statement() {
     let users = table("users");
     let bad = String::from("a\0b");
