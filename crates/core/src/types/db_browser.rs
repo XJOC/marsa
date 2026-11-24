@@ -352,6 +352,18 @@ pub struct DbResult {
     pub cut: bool,
     pub elapsed_ms: u64,
 }
+/// The end of a `db_query` job: what its rows are, not the rows. They wait
+/// for `GET /v1/db/results/{id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbQueryDone {
+    pub columns: Vec<DbPageColumn>,
+    /// The rows kept.
+    pub rows: u64,
+    /// The statement gave more rows than were kept.
+    pub cut: bool,
+    pub elapsed_ms: u64,
+}
+
 /// `POST /v1/db/tables`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

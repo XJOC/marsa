@@ -135,6 +135,7 @@ where
                 code: err.code.to_owned(),
                 message: err.message.clone(),
                 http_status: Some(err.status.as_u16()),
+                detail: err.detail.clone(),
             }),
         };
         daemon.publish_job(event(update));

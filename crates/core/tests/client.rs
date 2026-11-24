@@ -1299,6 +1299,7 @@ async fn a_failed_job_is_the_error_it_carries() {
             code: "internal_error".into(),
             message: "the setup job failed".into(),
             http_status: None,
+            detail: None,
         }),
     );
     let fake = Fake::start(job_router(vec![vec![Event::Job(failed)]], None)).await;
@@ -1317,6 +1318,7 @@ async fn a_failed_job_is_the_error_it_carries() {
             code: "service_busy".into(),
             message: "another action runs".into(),
             http_status: Some(409),
+            detail: None,
         }),
     );
     let router = job_router(vec![vec![Event::Job(busy)]], None).route(

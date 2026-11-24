@@ -4,9 +4,10 @@
 use reqwest::Method;
 
 use super::{ClientError, DaemonClient, REQUEST_TIMEOUT};
+use crate::codes;
 use crate::types::{
-    DbCellRequest, DbPage, DbRowsRequest, DbSource, DbSources, DbTable, DbTableRef, DbTableRequest,
-    DbTables, DbTablesRequest, DbValue,
+    DbCellRequest, DbPage, DbQueryRequest, DbResult, DbRowsRequest, DbSource, DbSources, DbTable,
+    DbTableRef, DbTableRequest, DbTables, DbTablesRequest, DbValue, JobOutcome,
 };
 
 impl DaemonClient {
@@ -75,6 +76,39 @@ impl DaemonClient {
     pub async fn db_cell(&self, request: &DbCellRequest) -> Result<DbValue, ClientError> {
         self.call_with(Method::POST, &["v1", "db", "cell"], request)
             .await
+    }
+
+    /// `POST /v1/jobs/db/query`, then follows the job to its end, then
+    /// `GET /v1/db/results/{id}`: the rows of one statement, and the job's
+    /// id. No request waits long: the statement runs as a job (ADR 0026).
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `db_one_statement` and `db_sql_too_long` (400),
+    /// `db_busy` (409), and the job's own failure: `db_read_only`,
+    /// `db_query_failed`, `db_timeout`, with the server's words in
+    /// [`ClientError::detail`]. `db_result_gone` when the daemon stopped
+    /// before the end, or the rows were read by another client.
+    pub async fn run_db_query(
+        &self,
+        request: &DbQueryRequest,
+    ) -> Result<(u64, DbResult), ClientError> {
+        let (id, outcome) = self
+            .run_job_with(
+                &["v1", "jobs", "db", "query"],
+                Some(request),
+                codes::DB_RESULT_GONE,
+            )
+            .await?;
+        let JobOutcome::DbQuery(_) = outcome else {
+            return Err(ClientError::bad_response(
+                "the job ended with the result of another kind of job",
+            ));
+        };
+        let result = self
+            .call(Method::GET, &["v1", "db", "results", &id.to_string()])
+            .await?;
+        Ok((id, result))
     }
 
     /// `POST /v1/db/close`: every connection of the browser closes. The window

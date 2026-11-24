@@ -21,14 +21,14 @@ const ROUTES: [(&str, &str); 3] = [
     ("POST", "/v1/db/close"),
 ];
 
-struct App {
-    dir: TempDir,
-    daemon: Arc<Daemon>,
-    router: TestRouter,
+pub(super) struct App {
+    pub(super) dir: TempDir,
+    pub(super) daemon: Arc<Daemon>,
+    pub(super) router: TestRouter,
 }
 
 impl App {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let data = dir.path().join("data");
         fs::create_dir_all(&data).unwrap();
@@ -42,7 +42,7 @@ impl App {
     }
 
     /// A linked site `name` with an empty project folder.
-    async fn site(&self, name: &str) -> PathBuf {
+    pub(super) async fn site(&self, name: &str) -> PathBuf {
         let root = self.dir.path().join("code").join(name);
         fs::create_dir_all(&root).unwrap();
         let body = json!({ "name": name, "path": root });
@@ -62,13 +62,13 @@ impl App {
     }
 }
 
-fn blog() -> Value {
+pub(super) fn blog() -> Value {
     json!({ "kind": "site_file", "site": "blog" })
 }
 
 /// Makes the site's SQLite file with `sql`, through a connection that may
 /// write, as the site's own app would.
-async fn make_file(root: &Path, sql: &'static str) -> PathBuf {
+pub(super) async fn make_file(root: &Path, sql: &'static str) -> PathBuf {
     let file = root.join("database").join("database.sqlite");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     let mut connection = SqliteConnectOptions::new()
