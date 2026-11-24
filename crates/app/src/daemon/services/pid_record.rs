@@ -10,11 +10,11 @@
 //!   signalled;
 //! - cannot be told: no signal, and the record stays.
 //!
-//! The database servers and the sites' workers write their records their
-//! own way; this module only reads and acts on one.
+//! Each user writes its records its own way (the database servers in
+//! `databases::orphan`); this module only reads and acts on one.
 
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use marsa_core::orphan::{PidRecord, PidfileState, classify_pidfile};
@@ -35,16 +35,16 @@ const KILL_WAIT: Duration = Duration::from_secs(5);
 /// Whose pid record [`clear`] reads.
 #[derive(Debug, Clone)]
 pub(crate) struct Owner<'a> {
-    /// For the daemon's log: `postgres`, `queue-shop`.
+    /// For the daemon's log: `postgres`.
     pub(crate) id: ServiceId,
-    /// In the reasons of [`Stuck`]: `PostgreSQL`, `queue worker`.
+    /// In the reasons of [`Stuck`]: `PostgreSQL`.
     pub(crate) name: &'a str,
     /// `run/<id>.pid`.
     pub(crate) pid_file: PathBuf,
     /// The port it listens on, waited for once it is gone. `None`: no port.
     pub(crate) port: Option<u16>,
-    /// The system recovers orphans of this kind
-    /// (`process::DATABASE_ORPHAN_RECOVERY`): else nothing is read.
+    /// The system recovers orphans of this kind (for a database server
+    /// `process::DATABASE_ORPHAN_RECOVERY`): else nothing is read.
     pub(crate) recovery: bool,
 }
 
@@ -52,7 +52,7 @@ pub(crate) struct Owner<'a> {
 /// server's port and a stop program are left out: they find the server by its
 /// port or its data folder, which does not prove that the process of the pid
 /// record is the one that holds them.
-pub(crate) fn signal_steps(ladder: &StopMethod) -> Vec<(Signal, Duration)> {
+fn signal_steps(ladder: &StopMethod) -> Vec<(Signal, Duration)> {
     ladder
         .steps
         .iter()
@@ -67,9 +67,10 @@ pub(crate) fn signal_steps(ladder: &StopMethod) -> Vec<(Signal, Duration)> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Stuck(pub(crate) String);
 
-/// How many times a start looks at the pid of the record. It goes on to its
-/// own checks after a look that cannot tell: a server of ours would still
-/// hold its port and its own pid file, which refuse it.
+/// How many times the start of a server looks at the pid of the record. It
+/// goes on to its own checks after a look that cannot tell: a server of ours
+/// would still hold its port and its own pid file, which refuse it. A
+/// process with no port has no such check, and looks [`STOP_LOOKS`] times.
 pub(crate) const START_LOOKS: u32 = 1;
 /// How many times a stop looks, when the system cannot tell who runs the
 /// pid, before it goes on without a signal: a `ps` or `lsof` may fail once,
@@ -84,12 +85,12 @@ pub(crate) enum Cleared {
     /// No file: nothing was signalled.
     Nothing,
     /// The system could not tell whether the pid of the file is our old
-    /// server, at any look: nothing was signalled, and the file stays.
+    /// process, at any look: nothing was signalled, and the file stays.
     Unknown { pid: u32 },
     /// The file named a process that is gone or another program's now: only
     /// the file was deleted.
     Forgotten,
-    /// Our old server ended after `signal`, the last one sent (`None`: it
+    /// Our old process ended after `signal`, the last one sent (`None`: it
     /// ended before any).
     Stopped { pid: u32, signal: Option<Signal> },
 }
@@ -101,7 +102,7 @@ pub(crate) enum Cleared {
 ///
 /// # Errors
 ///
-/// [`Stuck`], with the reason, when our server still runs after SIGKILL, or
+/// [`Stuck`], with the reason, when our process still runs after SIGKILL, or
 /// cannot be told from another program after a signal. Nothing else is
 /// signalled then.
 pub(crate) async fn clear(
@@ -204,7 +205,7 @@ pub(crate) async fn check(
     classify_pidfile(record, servers, &now)
 }
 
-/// Polls until the process is not our server any more, at most `limit`. An
+/// Polls until the process is not ours any more, at most `limit`. An
 /// answer that cannot be told waits on: it may be a `ps` that failed once.
 async fn gone(
     probes: &dyn ProcessProbe,
@@ -249,8 +250,13 @@ async fn done(owner: &Owner<'_>, pid: u32, signal: Option<Signal>) -> Cleared {
 
 /// Deletes the pid record of `owner`.
 fn forget(owner: &Owner<'_>) {
-    if let Err(err) = process::remove_pid_file(&owner.pid_file) {
-        warn!(%err, service = %owner.id, "cannot delete the pid record");
+    remove(&owner.pid_file, owner.id);
+}
+
+/// Deletes the pid record `path` of service `id`. No file is not an error.
+pub(crate) fn remove(path: &Path, id: ServiceId) {
+    if let Err(err) = process::remove_pid_file(path) {
+        warn!(%err, service = %id, "cannot delete the pid record");
     }
 }
 

@@ -277,9 +277,7 @@ pub(super) fn forget_run(kind: ServerKind, data_dir: &Path, pid: u32) {
 
 /// Deletes `run/<id>.pid`.
 fn forget(kind: ServerKind, data_dir: &Path) {
-    if let Err(err) = process::remove_pid_file(&pid_path(kind, data_dir)) {
-        warn!(%err, server = kind.id(), "cannot delete the pid record");
-    }
+    pid_record::remove(&pid_path(kind, data_dir), ServiceId::Database(kind));
 }
 
 /// The one of `programs`, the server program of each installed version, that

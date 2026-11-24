@@ -237,7 +237,7 @@ impl ServerManager {
     /// [`Self::prepare`] for Valkey: `valkey.conf`, and the check of its
     /// port. Valkey has no pid file of its own and no lock on its data
     /// folder, so the port is the whole check, after our own record of its
-    /// pid ([`orphan::clear`]). A program that holds the port, Homebrew's
+    /// pid ([`pid_record::clear`]). A program that holds the port, Homebrew's
     /// Redis or Herd's, refuses the start with its name. No first init:
     /// Valkey starts on an empty folder.
     async fn prepare_valkey(
@@ -274,7 +274,7 @@ impl ServerManager {
     /// [`Self::prepare`] for Mailpit: the check of both its ports, SMTP and
     /// the web page, then its mail folder. Mailpit has no pid file of its own
     /// and no lock, so the ports are the whole check, after our own record of
-    /// its pid ([`orphan::clear`]). Another mail catcher on either port
+    /// its pid ([`pid_record::clear`]). Another mail catcher on either port
     /// (Herd's, Docker's) refuses the start with its name.
     async fn prepare_mailpit(
         &self,

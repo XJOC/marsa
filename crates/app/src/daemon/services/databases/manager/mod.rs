@@ -60,7 +60,7 @@ pub struct ServerManager {
     /// The system whose programs run: [`Platform::current`].
     platform: Option<Platform>,
     /// How an old server that a crashed `marsad` left running is stopped
-    /// before a start ([`orphan::clear`]): [`ServerKind::stop`], then
+    /// before a start ([`pid_record::clear`]): [`ServerKind::stop`], then
     /// SIGKILL.
     pub(super) orphan_ladder: StopMethod,
     /// Whether `marsad` runs with an administrator's token, asked at each
@@ -429,7 +429,7 @@ impl ServerManager {
 
     /// Stops the task by the spec (for PostgreSQL SIGINT, then SIGQUIT),
     /// then a kill. When this daemon runs none, our old server that an
-    /// earlier `marsad` left running is stopped instead ([`orphan::clear`]),
+    /// earlier `marsad` left running is stopped instead ([`pid_record::clear`]),
     /// with a few looks when the system cannot tell who runs its pid. If it
     /// cannot be stopped or told, the recent lines say why, and the stop
     /// still ends as one: the next start refuses while it holds the port.
