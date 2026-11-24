@@ -215,10 +215,14 @@ pub const SETUP_PROMPT_FAILED: &str = "setup_prompt_failed";
 pub const SETUP_RUNNING: &str = "setup_running";
 pub const SETUP_TIMED_OUT: &str = "setup_timed_out";
 pub const SITE_IS_PARKED: &str = "site_is_parked";
+/// `storage/logs` of a site is not a folder inside the site, for example a link out of it, or the log file is a link.
+pub const SITE_LOG_UNSAFE: &str = "site_log_unsafe";
 pub const SITE_NAME_INVALID: &str = "site_name_invalid";
 pub const SITE_NAME_TAKEN: &str = "site_name_taken";
 pub const SITE_NOT_A_FOLDER: &str = "site_not_a_folder";
 pub const SITE_NOT_FOUND: &str = "site_not_found";
+/// The site is not a Laravel project (no `artisan`), so it has no Laravel log or workers.
+pub const SITE_NOT_LARAVEL: &str = "site_not_laravel";
 pub const SITE_PATH_NOT_UTF8: &str = "site_path_not_utf8";
 pub const SITE_PATH_RELATIVE: &str = "site_path_relative";
 pub const SITE_READ_DIR: &str = "site_read_dir";
@@ -478,10 +482,12 @@ pub const ALL: &[&str] = &[
     SETUP_RUNNING,
     SETUP_TIMED_OUT,
     SITE_IS_PARKED,
+    SITE_LOG_UNSAFE,
     SITE_NAME_INVALID,
     SITE_NAME_TAKEN,
     SITE_NOT_A_FOLDER,
     SITE_NOT_FOUND,
+    SITE_NOT_LARAVEL,
     SITE_PATH_NOT_UTF8,
     SITE_PATH_RELATIVE,
     SITE_READ_DIR,
