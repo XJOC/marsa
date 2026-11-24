@@ -18,8 +18,7 @@
 use std::sync::Arc;
 
 use eframe::egui::{
-    Align, Color32, Id, Label, Rect, RichText, ScrollArea, Sense, TextWrapMode, Ui, UiBuilder,
-    Vec2, vec2,
+    Align, Id, Label, Rect, RichText, ScrollArea, Sense, TextWrapMode, Ui, UiBuilder, Vec2, vec2,
 };
 use marsa_core::types::{Dump, DumpsStatus, MAX_KEPT_DUMPS};
 
@@ -491,7 +490,7 @@ fn text_lines(ui: &mut Ui, theme: &Theme, dump: &Detail<'_>, viewport: Rect) {
     let font = theme.text.mono_sm.font_id();
     let row = ui
         .painter()
-        .layout_no_wrap("Ag".to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .layout_no_wrap("Ag".to_owned(), font.clone(), theme.color.ink)
         .size()
         .y;
     // The rows touch: there is no space between lines of a text.
