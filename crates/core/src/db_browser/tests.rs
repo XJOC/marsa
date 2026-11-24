@@ -135,8 +135,9 @@ fn table_statements(engine: Engine) -> String {
         page_sql(engine, &table("events"), &[], None, 99_500).unwrap(),
         page_sql(engine, &table("events"), &[], Some(&by_email), 0).unwrap(),
         count_sql(engine, &users).unwrap(),
-        cell_sql(engine, &users, "bio", &id).unwrap(),
-        cell_sql(engine, &users, "note", &names(&["order_id", "line"])).unwrap(),
+        cell_sql(engine, &users, "bio", &id, false).unwrap(),
+        cell_sql(engine, &users, "note", &names(&["order_id", "line"]), false).unwrap(),
+        cell_sql(engine, &users, "avatar", &id, true).unwrap(),
     ];
     if engine == Engine::Postgres {
         let log = DbTableRef {
@@ -187,8 +188,8 @@ fn a_bad_name_anywhere_stops_the_statement() {
         assert!(page_sql(engine, &users, std::slice::from_ref(&bad), None, 0).is_err());
         assert!(page_sql(engine, &users, &[], Some(&sort), 0).is_err());
         assert!(count_sql(engine, &table("")).is_err());
-        assert!(cell_sql(engine, &users, &bad, &names(&["id"])).is_err());
-        assert!(cell_sql(engine, &users, "bio", std::slice::from_ref(&bad)).is_err());
+        assert!(cell_sql(engine, &users, &bad, &names(&["id"]), false).is_err());
+        assert!(cell_sql(engine, &users, "bio", std::slice::from_ref(&bad), false).is_err());
     }
 }
 
@@ -196,7 +197,7 @@ fn a_bad_name_anywhere_stops_the_statement() {
 fn a_value_is_read_by_primary_key_only() {
     for engine in ENGINES {
         assert_eq!(
-            cell_sql(engine, &table("events"), "body", &[]),
+            cell_sql(engine, &table("events"), "body", &[], false),
             Err(SqlError::NoKey)
         );
     }

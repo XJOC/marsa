@@ -5,8 +5,8 @@ use reqwest::Method;
 
 use super::{ClientError, DaemonClient, REQUEST_TIMEOUT};
 use crate::types::{
-    DbPage, DbRowsRequest, DbSource, DbSources, DbTable, DbTableRef, DbTableRequest, DbTables,
-    DbTablesRequest,
+    DbCellRequest, DbPage, DbRowsRequest, DbSource, DbSources, DbTable, DbTableRef, DbTableRequest,
+    DbTables, DbTablesRequest, DbValue,
 };
 
 impl DaemonClient {
@@ -62,6 +62,18 @@ impl DaemonClient {
     /// table does not have.
     pub async fn db_rows(&self, request: &DbRowsRequest) -> Result<DbPage, ClientError> {
         self.call_with(Method::POST, &["v1", "db", "rows"], request)
+            .await
+    }
+
+    /// `POST /v1/db/cell`: one whole value, up to
+    /// `marsa_core::db_browser::VALUE_BYTES`, by the row's primary key.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::db_table`]; `db_row_not_found` (404) when no row has the
+    /// key or the table has none.
+    pub async fn db_cell(&self, request: &DbCellRequest) -> Result<DbValue, ClientError> {
+        self.call_with(Method::POST, &["v1", "db", "cell"], request)
             .await
     }
 

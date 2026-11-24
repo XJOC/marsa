@@ -57,6 +57,8 @@ pub const DB_QUERY_FAILED: &str = "db_query_failed";
 pub const DB_READ_ONLY: &str = "db_read_only";
 /// A statement's rows were read once already, or kept too long.
 pub const DB_RESULT_GONE: &str = "db_result_gone";
+/// No row has the key a whole value was asked by, or the table has no key.
+pub const DB_ROW_NOT_FOUND: &str = "db_row_not_found";
 pub const DB_SERVER_NOT_RUNNING: &str = "db_server_not_running";
 /// The server refused `root` with no password.
 pub const DB_SIGN_IN_FAILED: &str = "db_sign_in_failed";
@@ -364,6 +366,7 @@ pub const ALL: &[&str] = &[
     DB_QUERY_FAILED,
     DB_READ_ONLY,
     DB_RESULT_GONE,
+    DB_ROW_NOT_FOUND,
     DB_SERVER_NOT_RUNNING,
     DB_SIGN_IN_FAILED,
     DB_SOURCE_INVALID,

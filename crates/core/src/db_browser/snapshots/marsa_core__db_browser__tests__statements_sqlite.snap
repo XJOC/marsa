@@ -1,6 +1,6 @@
 ---
 source: crates/core/src/db_browser/tests.rs
-expression: "statements(Engine::Sqlite)"
+expression: "table_statements(Engine::Sqlite)"
 ---
 SELECT * FROM "users" ORDER BY "id" LIMIT 500 OFFSET 0
 SELECT * FROM "users" ORDER BY "email" DESC, "id" LIMIT 500 OFFSET 500
@@ -11,3 +11,4 @@ SELECT * FROM "events" ORDER BY "email" DESC LIMIT 500 OFFSET 0
 SELECT COUNT(*) FROM "users"
 SELECT "bio" FROM "users" WHERE "id" = ?
 SELECT "note" FROM "users" WHERE "order_id" = ? AND "line" = ?
+SELECT "avatar" FROM "users" WHERE "id" = ?
