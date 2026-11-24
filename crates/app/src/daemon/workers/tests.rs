@@ -286,7 +286,16 @@ mod real {
         let worker_failed = |s: &ServiceStatus| matches!(&s.state, ServiceState::Failed { code } if code == codes::WORKER_FAILED);
         let failed = wait_for(&daemon, worker_failed).await;
         assert_eq!(failed.restarts, 2);
-        assert!(!daemon.proc_alive(queue()));
+        // The task ends a moment after its last state: the record of the
+        // run is taken down first.
+        let ended = async {
+            while daemon.proc_alive(queue()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(WAIT, ended)
+            .await
+            .expect("the task ended");
 
         // A pass does not start it again.
         fs::remove_file(root.join("fail")).unwrap();
@@ -430,6 +439,377 @@ mod real {
         wait_line(&daemon, "runtimes/php/8.3.2/bin/php -c").await;
         daemon.stop_procs(WAIT).await;
         gone(second.pid.unwrap()).await;
+    }
+
+    // The wiring of the orphan check (`orphan`) through the manager. Each
+    // test gives the manager a process list of its own.
+    mod orphans {
+        use super::*;
+        use std::io;
+        use std::sync::Mutex;
+
+        use marsa_core::orphan::{ChildProcess, Liveness, PidRecord};
+        use marsa_core::platform::process::{self, Signal};
+        use marsa_core::ps::StartTime;
+
+        use crate::daemon::services::probe::{BoxFuture, ProcessProbe};
+
+        /// The real process list, where every live process runs `php`: the
+        /// fake PHP is a script whose real program is a shell, then `sleep`.
+        #[derive(Debug)]
+        struct AsPhp {
+            php: PathBuf,
+        }
+
+        impl ProcessProbe for AsPhp {
+            fn real_identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
+                Box::pin(async move {
+                    match process::real_identity(pid).await {
+                        Liveness::Alive { started, .. } => Liveness::Alive {
+                            exe: self.php.clone(),
+                            started,
+                        },
+                        other => other,
+                    }
+                })
+            }
+
+            fn children(&self, ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>> {
+                Box::pin(process::children(ppid))
+            }
+
+            fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
+                Box::pin(process::send_signal(pid, signal))
+            }
+        }
+
+        /// A process list where pid `pid` is our old worker, `now`, for
+        /// ever, and no other process can be told.
+        #[derive(Debug)]
+        struct Stubborn {
+            pid: u32,
+            now: Liveness,
+            signals: Mutex<Vec<Signal>>,
+        }
+
+        impl ProcessProbe for Stubborn {
+            fn real_identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
+                let now = if pid == self.pid {
+                    self.now.clone()
+                } else {
+                    Liveness::Unknown
+                };
+                Box::pin(std::future::ready(now))
+            }
+
+            fn children(&self, _ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>> {
+                Box::pin(std::future::ready(Some(Vec::new())))
+            }
+
+            fn signal(&self, _pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
+                lock(&self.signals).push(signal);
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        fn php(data: &Path) -> PathBuf {
+            data.join("runtimes/php/8.4.1/bin/php")
+        }
+
+        /// Kills the process at the end of a test that failed before it
+        /// was gone. Disarmed once it is gone: its pid may be someone
+        /// else's then.
+        struct KillOnDrop(Option<u32>);
+
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                // No assert: a panic here, while a failed test unwinds,
+                // would abort the run.
+                if let Some(pid) = self.0.take() {
+                    let _ = std::process::Command::new("/bin/kill")
+                        .args(["-KILL", &pid.to_string()])
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            }
+        }
+
+        fn record_of(data: &Path, id: ServiceId) -> Option<PidRecord> {
+            process::read_pid_file(&orphan::pid_path(data, id))
+        }
+
+        async fn wait_until(what: &str, ok: impl Fn() -> bool) {
+            let wait = async {
+                while !ok() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            let done = tokio::time::timeout(WAIT, wait).await;
+            assert!(done.is_ok(), "{what}");
+        }
+
+        #[tokio::test]
+        async fn each_run_of_a_worker_is_recorded_and_the_record_goes_with_it() {
+            let Setup {
+                _temp,
+                data,
+                root,
+                daemon,
+                mut manager,
+            } = setup();
+            install_php(&data, "8.4.1");
+            manager.probes = Arc::new(AsPhp { php: php(&data) });
+            let on = site(&root, SiteKind::Laravel, Some("8.4.1"), true, false);
+            manager.sync(&daemon, std::slice::from_ref(&on)).await;
+            let first = wait_for(&daemon, running).await.pid.unwrap();
+            let names = |pid: u32| record_of(&data, queue()).is_some_and(|r| r.pid == pid);
+            wait_until("the record of the first run", || names(first)).await;
+
+            kill(first);
+            let second = wait_for(&daemon, |s| running(s) && s.pid != Some(first)).await;
+            let second = second.pid.unwrap();
+            wait_until("the record of the restart", || names(second)).await;
+
+            let off = site(&root, SiteKind::Laravel, Some("8.4.1"), false, false);
+            manager.sync(&daemon, &[off]).await;
+            assert!(record_of(&data, queue()).is_none());
+            gone(second).await;
+        }
+
+        #[tokio::test]
+        async fn a_new_manager_stops_the_worker_a_crashed_one_left_running() {
+            let Setup {
+                _temp,
+                data,
+                root,
+                daemon,
+                mut manager,
+            } = setup();
+            install_php(&data, "8.4.1");
+            manager.probes = Arc::new(AsPhp { php: php(&data) });
+            // The old worker: started by a shell that ends at once, so its
+            // parent is not this process, which stands for the daemon. A
+            // fixed shell line, in a test only, with the path as `$0`.
+            let started = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "\"$0\" -c x artisan queue:work >/dev/null 2>&1 & echo $!",
+                ])
+                .arg(php(&data))
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            let old: u32 = String::from_utf8(started.stdout)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            // Killed even when an assert fails: it is no child of this test.
+            let mut kill = KillOnDrop(Some(old));
+            let identity = tokio::time::timeout(WAIT, async {
+                loop {
+                    if let Liveness::Alive { started, .. } = process::real_identity(old).await {
+                        return started;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            });
+            let record = PidRecord {
+                pid: old,
+                exe: php(&data),
+                started: identity.await.expect("the old worker runs"),
+            };
+            process::write_pid_file(&orphan::pid_path(&data, queue()), &record).unwrap();
+
+            let on = site(&root, SiteKind::Laravel, Some("8.4.1"), true, false);
+            manager.sync(&daemon, &[on]).await;
+            gone(old).await;
+            kill.0 = None;
+            let new = wait_for(&daemon, running).await;
+            assert_ne!(new.pid, Some(old));
+            wait_line(
+                &daemon,
+                &format!("marsad: stopped the queue-shop (pid {old})"),
+            )
+            .await;
+            daemon.stop_procs(WAIT).await;
+            gone(new.pid.unwrap()).await;
+        }
+
+        fn schedule() -> ServiceId {
+            ServiceId::Worker(WorkerKind::Schedule, SiteKey::new("shop").unwrap())
+        }
+
+        /// Our old worker at pid 4242, started at tick 7.
+        fn old_worker(data: &Path) -> Liveness {
+            let record = PidRecord {
+                pid: 4242,
+                exe: php(data),
+                started: StartTime::Ticks(7),
+            };
+            process::write_pid_file(&orphan::pid_path(data, schedule()), &record).unwrap();
+            Liveness::Alive {
+                exe: php(data),
+                started: StartTime::Ticks(7),
+            }
+        }
+
+        // `schedule`: its grace is 5 s, so the stuck path takes about 10 s.
+        #[tokio::test]
+        async fn an_old_worker_that_does_not_stop_keeps_the_new_one_off_until_a_restart() {
+            let Setup {
+                _temp,
+                data,
+                root,
+                daemon,
+                mut manager,
+            } = setup();
+            install_php(&data, "8.4.1");
+            let now = old_worker(&data);
+            let probe = Arc::new(Stubborn {
+                pid: 4242,
+                now,
+                signals: Mutex::new(Vec::new()),
+            });
+            manager.probes = probe.clone();
+            let on = site(&root, SiteKind::Laravel, Some("8.4.1"), false, true);
+            manager.sync(&daemon, std::slice::from_ref(&on)).await;
+            let status = lock(&daemon.workers().find(schedule()).unwrap())
+                .status
+                .clone();
+            let stuck = ServiceState::Failed {
+                code: codes::WORKER_ORPHAN_STUCK.to_owned(),
+            };
+            assert_eq!(status.state, stuck);
+            assert!(!daemon.proc_alive(schedule()));
+            assert_eq!(*lock(&probe.signals), [Signal::Term, Signal::Kill]);
+            // The next pass does not wait for it again.
+            manager.sync(&daemon, &[on]).await;
+            assert_eq!(lock(&probe.signals).len(), 2);
+        }
+
+        /// A process list where pid 4242 is our old worker for two looks
+        /// (before the start, before the signal), then gone.
+        #[derive(Debug)]
+        struct Fading {
+            looks: Mutex<u32>,
+            signals: Mutex<Vec<(u32, Signal)>>,
+            php: PathBuf,
+        }
+
+        impl ProcessProbe for Fading {
+            fn real_identity(&self, pid: u32) -> BoxFuture<'_, Liveness> {
+                let mut looks = lock(&self.looks);
+                let now = if pid == 4242 && *looks < 2 {
+                    *looks += 1;
+                    Liveness::Alive {
+                        exe: self.php.clone(),
+                        started: StartTime::Ticks(7),
+                    }
+                } else if pid == 4242 {
+                    Liveness::Gone
+                } else {
+                    Liveness::Unknown
+                };
+                Box::pin(std::future::ready(now))
+            }
+
+            fn children(&self, _ppid: u32) -> BoxFuture<'_, Option<Vec<ChildProcess>>> {
+                Box::pin(std::future::ready(Some(Vec::new())))
+            }
+
+            fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
+                lock(&self.signals).push((pid, signal));
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        #[tokio::test]
+        async fn the_first_pass_stops_an_old_worker_no_site_asks_for_any_more() {
+            let Setup {
+                _temp,
+                data,
+                root,
+                daemon,
+                mut manager,
+            } = setup();
+            install_php(&data, "8.4.1");
+            // `queue-old`: its site was turned off while no daemon ran.
+            let old = ServiceId::Worker(WorkerKind::Queue, SiteKey::new("old").unwrap());
+            let record = |id: ServiceId| {
+                let record = PidRecord {
+                    pid: 4242,
+                    exe: php(&data),
+                    started: StartTime::Ticks(7),
+                };
+                process::write_pid_file(&orphan::pid_path(&data, id), &record).unwrap();
+            };
+            record(old);
+            let run = marsa_core::data_dir::DataDir::new(&data).run();
+            fs::write(run.join("postgres.pid"), "{}").unwrap();
+            let probe = Arc::new(Fading {
+                looks: Mutex::new(0),
+                signals: Mutex::new(Vec::new()),
+                php: php(&data),
+            });
+            manager.probes = probe.clone();
+            let on = site(&root, SiteKind::Laravel, Some("8.4.1"), true, false);
+            manager.sync(&daemon, std::slice::from_ref(&on)).await;
+            assert_eq!(*lock(&probe.signals), [(4242, Signal::Term)]);
+            assert!(record_of(&data, old).is_none());
+            // Not a worker's record: left alone.
+            assert!(run.join("postgres.pid").exists());
+            // The wanted worker started, and is not swept.
+            let new = wait_for(&daemon, running).await;
+            assert!(daemon.workers().find(old).is_none());
+
+            // Once only: a record that appears later waits for the next
+            // daemon.
+            let later = ServiceId::Worker(WorkerKind::Schedule, SiteKey::new("old").unwrap());
+            record(later);
+            manager.sync(&daemon, &[on]).await;
+            assert_eq!(lock(&probe.signals).len(), 1);
+            assert!(record_of(&data, later).is_some());
+            daemon.stop_procs(WAIT).await;
+            gone(new.pid.unwrap()).await;
+        }
+
+        #[tokio::test]
+        async fn an_old_worker_that_cannot_be_told_gets_no_signal_and_the_new_one_starts() {
+            let Setup {
+                _temp,
+                data,
+                root,
+                daemon,
+                mut manager,
+            } = setup();
+            install_php(&data, "8.4.1");
+            old_worker(&data);
+            let probe = Arc::new(Stubborn {
+                pid: 4242,
+                now: Liveness::Unknown,
+                signals: Mutex::new(Vec::new()),
+            });
+            manager.probes = probe.clone();
+            let on = site(&root, SiteKind::Laravel, Some("8.4.1"), false, true);
+            manager.sync(&daemon, &[on]).await;
+            let found = daemon.workers().find(schedule()).unwrap();
+            let wait = async {
+                loop {
+                    let status = lock(&found).status.clone();
+                    if running(&status) {
+                        return status;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            let new = tokio::time::timeout(WAIT, wait).await.expect("it runs");
+            assert!(lock(&probe.signals).is_empty());
+            let lines = lock(&found).logs.recent();
+            assert!(lines.iter().any(|line| line.text.contains("cannot tell")));
+            daemon.stop_procs(WAIT).await;
+            gone(new.pid.unwrap()).await;
+        }
     }
 }
 

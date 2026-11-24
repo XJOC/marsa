@@ -1361,7 +1361,7 @@ async fn the_watcher_gives_up_after_the_record_limit_with_one_warning() {
     assert!(!pid_file.path.exists());
     let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert_eq!(log.matches("WARN").count(), 1, "{log}");
-    assert!(log.contains("php-fpm pid file not written"), "{log}");
+    assert!(log.contains("pid file not written"), "{log}");
     handle.stop().await.unwrap();
 }
 
