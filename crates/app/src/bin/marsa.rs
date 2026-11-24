@@ -65,7 +65,7 @@ enum Command {
     Daemon(DaemonCommand),
     /// List the services, or start, stop, or restart one.
     Services(ServicesArgs),
-    /// Show the output of a service.
+    /// Show the output of a service, or with --site a Laravel site's log.
     Logs(LogsArgs),
     /// List the mail your projects sent, which Mailpit kept on this
     /// computer; show one with "show <ID>", or delete all with "clear".
@@ -334,12 +334,37 @@ mod tests {
                 Command::Logs(got) => assert_eq!(
                     got,
                     LogsArgs {
-                        id: "caddy".into(),
+                        id: Some("caddy".into()),
+                        site: None,
                         follow,
                     }
                 ),
                 other => panic!("not logs: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn logs_takes_a_site_instead_of_an_id() {
+        for (args, follow) in [
+            (&["logs", "--site", "shop"][..], false),
+            (&["logs", "--site", "shop", "-f"], true),
+        ] {
+            match parse(args).expect("valid").command {
+                Command::Logs(got) => assert_eq!(
+                    got,
+                    LogsArgs {
+                        id: None,
+                        site: Some("shop".into()),
+                        follow,
+                    }
+                ),
+                other => panic!("not logs: {other:?}"),
+            }
+        }
+        for args in [&["logs"][..], &["logs", "caddy", "--site", "shop"]] {
+            let err = parse(args).expect_err("one of the two");
+            assert_eq!(err.exit_code(), 2, "{args:?}");
         }
     }
 

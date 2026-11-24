@@ -97,6 +97,21 @@ pub fn following(id: &str) -> String {
     format!("Showing new lines from {id} as they come. Press Ctrl+C to stop.")
 }
 
+/// On stderr when the site has no Laravel log yet.
+pub fn no_site_log(name: &str) -> String {
+    format!("{name} has no Laravel log yet (storage/logs/laravel.log).")
+}
+
+/// On stderr above a log whose start was left out.
+pub fn site_log_cut(file: &str) -> String {
+    format!("The end of {file}; older lines are left out.")
+}
+
+/// On stderr once `--site <name> -f` follows the log.
+pub fn following_site(name: &str) -> String {
+    format!("Showing new lines of {name}'s Laravel log as they come. Press Ctrl+C to stop.")
+}
+
 /// On stderr when the daemon dropped lines. `0`: it gave no count.
 pub fn lagged(count: u64) -> String {
     match count {
