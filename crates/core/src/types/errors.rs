@@ -22,6 +22,11 @@ pub struct ErrorBody {
     /// `sites_lose_php` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_use: Option<VersionInUse>,
+    /// What a database server said, with the database browser's codes only
+    /// (ADR 0028). The window shows it as data, never as Marsa's own words,
+    /// and the daemon never logs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl ErrorBody {
@@ -32,6 +37,7 @@ impl ErrorBody {
                 message: message.into(),
             },
             in_use: None,
+            detail: None,
         }
     }
 }

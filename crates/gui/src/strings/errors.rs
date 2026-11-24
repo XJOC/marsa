@@ -501,6 +501,30 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
         "mail_not_found" => "Mailpit has no mail with that id.",
         "mail_not_running" => "Mailpit does not run.",
         "mail_unavailable" => "Mailpit did not answer as expected.",
+        // The database browser (ADR 0028). A server's own message is shown
+        // under these as data, never from here.
+        "db_server_not_running" => "The database server is not running.",
+        "db_source_invalid" => "That database, table, or column cannot be opened.",
+        "db_not_found" => "The server has no database by that name.",
+        "db_table_not_found" => "The database has no table by that name.",
+        "db_file_not_found" => "The site has no SQLite file at database/database.sqlite.",
+        "db_file_outside_site" => {
+            "The site's SQLite file is not a regular file inside the site's folder, so Marsa \
+             does not open it."
+        }
+        "db_sign_in_failed" => {
+            "Marsa could not sign in to the server. It signs in as root with no password."
+        }
+        "db_unavailable" => "The database server did not answer as expected.",
+        "db_timeout" => "The database took too long to answer.",
+        "db_read_only" => "This statement changes data. This screen is read-only.",
+        "db_one_statement" => "Run one statement at a time.",
+        "db_sql_too_long" => "The statement is longer than 256 KB.",
+        "db_query_failed" => "The database did not run the statement.",
+        "db_query_cancelled" => "Cancelled.",
+        "db_busy" => "Another statement still runs on this database.",
+        "db_result_gone" => "The result is no longer kept. Run the statement again.",
+        "job_not_cancellable" => "This task cannot be cancelled.",
         "mailpit_init_failed" => "Marsa could not make Mailpit's mail folder.",
         "mailpit_not_installed" => "Mailpit is not installed.",
         "mailpit_orphan_stuck" => "An old Mailpit of this Marsa still runs and did not stop.",
