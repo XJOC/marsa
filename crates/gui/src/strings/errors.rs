@@ -50,6 +50,7 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
         "service_managed_by_sites" => {
             "This service starts and stops with the sites that need its PHP version."
         }
+        "php_not_installed" => "This worker needs the site's PHP, and none is installed for it.",
         "worker_failed" => {
             "This worker crashed again and again, so Marsa stopped it. Its log says why."
         }

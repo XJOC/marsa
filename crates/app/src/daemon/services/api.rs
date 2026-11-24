@@ -336,7 +336,8 @@ fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<(ServiceId, Service<'a>),
             ServiceId::Database(kind) => Some(Service::Server(daemon.server(kind))),
             ServiceId::Dns => daemon.dns().listed().then_some(Service::Dns(daemon.dns())),
             ServiceId::Pool(..) => daemon.pools().find(parsed).map(Service::Pool),
-            // Not run yet: the workers manager comes with the sites sync.
+            // The workers' routes come with their own change; until then a
+            // worker is not a service of the API.
             ServiceId::Worker(..) => None,
         };
         service.map(|service| (parsed, service))
