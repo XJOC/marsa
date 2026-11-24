@@ -42,3 +42,22 @@ api_status() {
   answer=$(api "$@")
   printf '%s %s\n' "${answer##*$'\n'}" "$(printf '%s' "${answer%$'\n'*}" | jq -r '.error.code // empty')"
 }
+
+# api_job_end ID: the last event of job ID, waiting up to 30 s for its end.
+api_job_end() {
+  local event
+  for _ in $(seq 1 300); do
+    event=$(api_ok GET "/v1/jobs/$1")
+    if [ "$(jq -r .status <<<"$event")" != running ]; then
+      printf '%s\n' "$event"
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "job $1 did not end in 30 s"
+}
+
+# api_query SOURCE_JSON SQL: starts the statement as a job, prints its id.
+api_query() {
+  api_ok POST /v1/jobs/db/query "$(jq -cn --argjson source "$1" --arg sql "$2" '{source: $source, sql: $sql}')" | jq -r .id
+}

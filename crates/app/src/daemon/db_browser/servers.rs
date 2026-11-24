@@ -111,6 +111,51 @@ pub(super) async fn query_connection(
     Ok(conn)
 }
 
+/// The server's id of `conn`, which a second connection names to stop its
+/// statement: PostgreSQL's backend pid, MySQL's connection id.
+pub(super) async fn backend_id(conn: &mut Conn) -> Result<u64, HttpError> {
+    let text: String = match conn {
+        Conn::Mysql(conn) => sqlx::query_scalar("SELECT CAST(CONNECTION_ID() AS CHAR)")
+            .fetch_one(conn)
+            .await
+            .map_err(db_error)?,
+        Conn::Postgres(conn) => sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()::text")
+            .fetch_one(conn)
+            .await
+            .map_err(db_error)?,
+    };
+    text.parse()
+        .map_err(|_| unavailable("the server gave no id for the connection".to_owned()))
+}
+
+/// Stops the statement that runs on the connection `backend`, from a short
+/// connection of its own. `root` may stop its own statements on both
+/// servers. Best effort: the statement's connection is dropped anyway.
+pub(super) async fn stop_statement(
+    daemon: &Daemon,
+    server: DbServer,
+    database: &str,
+    backend: u64,
+) {
+    let Ok(port) = port(daemon, server) else {
+        return;
+    };
+    let stop = async {
+        let mut conn = connect(server, port, Some(database)).await?;
+        let sql = match server {
+            DbServer::Mysql => format!("KILL QUERY {backend}"),
+            DbServer::Postgres => format!("SELECT pg_catalog.pg_cancel_backend({backend})"),
+        };
+        run(&mut conn, sql).await
+    };
+    if tokio::time::timeout(REQUEST_LIMIT, stop).await.is_err() {
+        tracing::warn!(
+            server = server.kind().id(),
+            "a cancel did not reach the server in time"
+        );
+    }
+}
+
 /// The port of the server this daemon runs, once it took connections.
 fn port(daemon: &Daemon, server: DbServer) -> Result<u16, HttpError> {
     if daemon.shutdown().is_cancelled() {

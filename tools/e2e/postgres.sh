@@ -219,6 +219,26 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.5
 done
 [ "$(tcp -U root -d postgres -c "$others")" = 0 ] || fail "a browser connection stayed open after close"
+# The user's SQL: a job whose rows are read once, a write the engine
+# refuses, and a cancel that stops the statement inside the server.
+id=$(api_query "$source" "SELECT id FROM posts ORDER BY id")
+[ "$(api_job_end "$id" | jq -r .status)" = done ] || fail "query $id"
+result=$(api_ok GET "/v1/db/results/$id")
+[ "$(jq -c .rows <<<"$result")" = '[["1"],["2"]]' ] || fail "result: $result"
+id=$(api_query "$source" "INSERT INTO posts (body) VALUES ('x')")
+end=$(api_job_end "$id")
+[ "$(jq -r .code <<<"$end")" = db_read_only ] || fail "a write: $end"
+[ "$(tcp -U root -d app -c 'select count(*) from posts')" = 2 ] || fail "the write went through"
+id=$(api_query "$source" "SELECT pg_sleep(30)")
+sleep 1
+api_ok DELETE "/v1/jobs/$id" >/dev/null
+[ "$(api_job_end "$id" | jq -r .code)" = db_query_cancelled ] || fail "the cancel"
+sleeping="select count(*) from pg_stat_activity where state = 'active' and query like 'SELECT pg_sleep%'"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ "$(tcp -U root -d postgres -c "$sleeping")" = 0 ] && break
+  sleep 0.3
+done
+[ "$(tcp -U root -d postgres -c "$sleeping")" = 0 ] || fail "the cancelled statement still runs in PostgreSQL"
 
 step "the running version cannot be uninstalled; its databases stay"
 refused 'in use' marsa uninstall postgres "$VERSION"
