@@ -297,8 +297,9 @@ impl DaemonClient {
     }
 
     /// `GET /v1/sites/{name}/log?follow=true`: the same lines, then each new
-    /// one as it is written. A stream that ends without `shutting_down` was
-    /// stopped by the daemon: the log became unsafe to read.
+    /// one as it is written. The stream ends when the daemon stops, or when
+    /// the log became unsafe to read; a new request then says which (409
+    /// `site_log_unsafe`).
     ///
     /// # Errors
     ///
