@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             json,
-            json!({ "status": "disabled", "latest_id": 0, "dumps": [] })
+            json!({ "status": "disabled", "latest_id": 0, "count": 0, "dumps": [] })
         );
         let (status, _) = app.answer("GET", "/v1/dumps?after=7", None).await;
         assert_eq!(status, StatusCode::OK);

@@ -11,12 +11,14 @@ use marsa_core::helper::{OpName, OpStatus};
 use marsa_core::resolver;
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    DoctorReport, Event, Health, HostsStatus, InstallEvent, InstallFailure, InstallProgress,
-    InstallUpdate, LogLine, MailList, MailText, PoolKind, RuntimeList, ServiceAction, ServiceId,
-    ServiceState, ServiceStatus, SetupReport, Site, SiteList, Source, VersionInUse, XdebugState,
+    DoctorReport, DumpList, Event, Health, HostsStatus, InstallEvent, InstallFailure,
+    InstallProgress, InstallUpdate, LogLine, MailList, MailText, PoolKind, RuntimeList,
+    ServiceAction, ServiceId, ServiceState, ServiceStatus, SetupReport, Site, SiteList, Source,
+    VersionInUse, XdebugState,
 };
 use semver::Version;
 
+mod dumps;
 mod installs;
 mod logs;
 mod mail;
@@ -27,6 +29,7 @@ mod session;
 mod setup;
 mod sites;
 
+pub use dumps::DumpsState;
 use installs::Install;
 pub use installs::{InstallJob, InstallStep, InstallView, install_version};
 pub use logs::{LogRow, LogSource, MAX_LOG_LINES, ServiceLog};
@@ -191,6 +194,14 @@ pub enum Update {
     /// Reading the list failed. A client error code; `mail_not_running`
     /// while Mailpit does not run.
     MailFailed(String),
+    /// What the bridge read of the dumps: the ones newer than the last it
+    /// sent, or all of them when `replace`.
+    Dumps {
+        list: DumpList,
+        replace: bool,
+    },
+    /// Reading the dumps failed. A client error code.
+    DumpsFailed(String),
     Event(Event),
 }
 
@@ -315,6 +326,12 @@ pub enum Action {
     OpenMailpit,
     /// "Open in browser": the chosen mail's page in Mailpit, with its HTML.
     OpenMailPage,
+    /// A row of the Dumps list, by the dump's id.
+    ChooseDump(u64),
+    /// "Clear" on Dumps.
+    ClearDumps,
+    /// The switch "Capture" on Dumps.
+    ToggleDumps,
 }
 
 /// The window's state: the daemon's session, and what belongs to the window
@@ -460,6 +477,8 @@ impl Model {
             Update::Mail(list) => self.set_mail(list),
             Update::MailText(text) => self.set_mail_text(text),
             Update::MailFailed(code) => self.mail_failed(code),
+            Update::Dumps { list, replace } => self.set_dumps(list, replace),
+            Update::DumpsFailed(code) => self.dumps_failed(code),
             Update::XdebugAnswered(answer) => {
                 self.session.xdebug_pending = None;
                 match answer {
@@ -653,6 +672,12 @@ impl Model {
                 removal => Command::Remove(removal),
             }),
             Action::ChooseMail(id) => self.choose_mail(id),
+            Action::ChooseDump(id) => {
+                self.choose_dump(id);
+                None
+            }
+            Action::ClearDumps => self.clear_dumps(),
+            Action::ToggleDumps => self.toggle_capture(),
             Action::AskDeleteMail => {
                 self.ask_removal(Removal::Mail);
                 None

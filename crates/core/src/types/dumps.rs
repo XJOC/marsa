@@ -25,6 +25,26 @@ pub struct Dump {
     pub truncated: bool,
 }
 
+/// The most dumps the daemon keeps, and the window with it.
+pub const MAX_KEPT_DUMPS: usize = 500;
+/// The most text (by [`Dump::weight`]) the daemon keeps, and the window with
+/// it.
+pub const MAX_KEPT_BYTES: usize = 16 * 1024 * 1024;
+
+impl Dump {
+    /// What this dump takes in memory, near enough: its strings and a fixed
+    /// part. The daemon and the window both keep dumps under
+    /// [`MAX_KEPT_BYTES`] by it.
+    pub fn weight(&self) -> usize {
+        let strings = [&self.source_file, &self.uri, &self.method, &self.label];
+        let optional: usize = strings
+            .iter()
+            .map(|text| text.as_ref().map_or(0, String::len))
+            .sum();
+        self.text.len() + optional + 128
+    }
+}
+
 /// What the dump server is doing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +65,11 @@ pub struct DumpList {
     /// The `id` of the newest dump ever kept, also after a clear. A client
     /// asks for `after` this to get only the new ones.
     pub latest_id: u64,
+    /// How many dumps the daemon holds now, also those that `after` left
+    /// out. A client that keeps the dumps it read drops its oldest ones
+    /// until it holds no more than this: the daemon has cleared or dropped
+    /// them.
+    pub count: u64,
     /// Newest first.
     pub dumps: Vec<Dump>,
 }
@@ -76,6 +101,7 @@ mod dump_tests {
         let list = DumpList {
             status: DumpsStatus::PortInUse,
             latest_id: 9,
+            count: 1,
             dumps: vec![Dump {
                 id: 9,
                 received_at: 1_700_000_000_000,
