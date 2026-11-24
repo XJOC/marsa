@@ -11,6 +11,7 @@ use marsa::cli::autostart::{self, AutostartArgs};
 use marsa::cli::daemon::{self, DaemonCommand};
 use marsa::cli::default_version::{self, UseArgs};
 use marsa::cli::doctor;
+use marsa::cli::dumps::{self, DumpsArgs};
 use marsa::cli::install::{self, InstallArgs};
 use marsa::cli::logs::{self, LogsArgs};
 use marsa::cli::mail::{self, MailArgs};
@@ -69,6 +70,14 @@ enum Command {
     /// List the mail your projects sent, which Mailpit kept on this
     /// computer; show one with "show <ID>", or delete all with "clear".
     Mail(MailArgs),
+    /// Show what dump() printed in your PHP sites, with its file, line, and
+    /// URL. With "--follow", new dumps as they come; "clear" deletes them;
+    /// "off" and "on" switch the capture.
+    ///
+    /// dd() shows here too, and leaves the page empty (HTTP 500). Only web
+    /// requests are sent here: dump() in "php artisan", tinker, or a test
+    /// stays in the terminal, unless that shell has VAR_DUMPER_FORMAT=server.
+    Dumps(DumpsArgs),
     /// `sites`, `park`, `link`, `secure`, `unsecure`, `unlink`, `forget`,
     /// `isolate`, `unisolate`, and `open`, each a command of its own.
     #[command(flatten)]
@@ -155,6 +164,7 @@ async fn main() -> ExitCode {
         Command::Services(args) => services::run(args, &data_dir).await,
         Command::Logs(args) => logs::run(args, &data_dir).await,
         Command::Mail(args) => mail::run(args, &data_dir).await,
+        Command::Dumps(args) => dumps::run(args, &data_dir).await,
         Command::Sites(command) => sites::run(command, &data_dir).await,
         Command::Setup => setup::run(&data_dir).await,
         Command::Autostart(args) => autostart::run(args, &data_dir).await,
