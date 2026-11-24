@@ -178,6 +178,24 @@ impl ServerManager {
         self.status().state != ServiceState::Stopped || any_installed(self.kind, data_dir)
     }
 
+    /// The port the server listens on: the one `global.toml` sets, or the
+    /// server's own. The database browser connects to it, and a stop looks
+    /// for our old server on it.
+    pub fn port(&self, data_dir: &Path) -> u16 {
+        read_settings(self.kind, data_dir)
+            .ok()
+            .and_then(|settings| settings.port)
+            .unwrap_or(self.kind.default_port())
+    }
+
+    /// The version a start runs, as the database browser lists it; `None`
+    /// when none is installed.
+    pub fn version(&self, data_dir: &Path) -> Option<semver::Version> {
+        let settings = read_settings(self.kind, data_dir).ok()?;
+        let (_, version, _) = self.installed(data_dir, &settings).ok()?;
+        Some(version)
+    }
+
     /// The program the server runs from now, or `None` while it does not
     /// run.
     pub fn running_program(&self, daemon: &Daemon) -> Option<PathBuf> {
@@ -435,6 +453,11 @@ impl ServerManager {
     /// Any other server is never touched.
     async fn stop(&self, daemon: &Daemon) {
         let kind = self.kind;
+        // The database browser's connections close first, so a stop never
+        // waits for an idle client of ours.
+        if let Some(browser) = daemon.open_db_browser() {
+            browser.close_server(kind);
+        }
         // `None`: nothing runs, or a shutdown took the handle and stops it.
         if let Some(handle) = daemon.take_proc(ServiceId::Database(kind)) {
             if let Err(err) = handle.stop().await {
@@ -448,10 +471,7 @@ impl ServerManager {
         let Some(platform) = self.platform else {
             return;
         };
-        let port = read_settings(kind, daemon.data_dir())
-            .ok()
-            .and_then(|settings| settings.port)
-            .unwrap_or(kind.default_port());
+        let port = self.port(daemon.data_dir());
         let servers = installed_servers(kind, daemon.data_dir(), platform);
         let ladder = &self.orphan_ladder;
         let probes = &*self.probes;

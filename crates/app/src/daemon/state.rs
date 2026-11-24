@@ -6,7 +6,7 @@
 use marsa_core::types::ServiceId;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockWriteGuard};
 use std::time::Duration;
 
 use marsa_core::config::{self, ConfigError, ConfigPaths, SitesConfig};
@@ -17,6 +17,7 @@ use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::autostart::Autostart;
+use super::db_browser::Browser;
 use super::dumps::DumpsService;
 use super::jobs::Jobs;
 use super::runtimes::installs::Installs;
@@ -114,6 +115,9 @@ pub struct Daemon {
     global_lock: Mutex<()>,
     /// The parked folders of the last build. Use [`Daemon::watch_parked`].
     parked: watch::Sender<Vec<PathBuf>>,
+    /// The database browser: made by the first request that opens a server
+    /// connection, so an idle `marsad` holds nothing of it (ADR 0028).
+    db_browser: OnceLock<Browser>,
 }
 
 impl Daemon {
@@ -141,6 +145,7 @@ impl Daemon {
             sites_lock: Mutex::default(),
             global_lock: Mutex::default(),
             parked: watch::Sender::new(Vec::new()),
+            db_browser: OnceLock::new(),
         }
     }
 
@@ -273,6 +278,17 @@ impl Daemon {
         // held cannot leave the state half changed.
         let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
         state.sites.clone()
+    }
+
+    /// The database browser, made now if no request made it yet.
+    pub fn db_browser(&self) -> &Browser {
+        self.db_browser.get_or_init(Browser::default)
+    }
+
+    /// The database browser, if a request made it: what closes it needs no
+    /// new one.
+    pub fn open_db_browser(&self) -> Option<&Browser> {
+        self.db_browser.get()
     }
 
     /// The site list of the last build, or a new build if there is none yet
