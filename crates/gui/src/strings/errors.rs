@@ -75,7 +75,10 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
         "site_not_found" => "No such site. It may have just been removed.",
         "site_name_invalid" => "That is not a valid site name.",
         "site_name_taken" => "Another folder already has that site name.",
-        "site_not_laravel" => "This site is not a Laravel project, so it has no Laravel log.",
+        "site_not_laravel" => {
+            "This site is not a Laravel project (it has no artisan file), so it has no Laravel \
+             log or workers."
+        }
         "site_log_unsafe" => {
             "Marsa does not read this log: storage/logs leads out of the project, or the log \
              file is a link."
