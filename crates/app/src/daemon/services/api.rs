@@ -1,8 +1,9 @@
-//! The services and logs routes: Caddy, the php-fpm pools, and PostgreSQL.
+//! The services and logs routes: Caddy, the php-fpm pools, the database
+//! servers, and the sites' workers.
 //!
 //! | Route | Answer |
 //! | --- | --- |
-//! | `GET /v1/services` | `Vec<ServiceStatus>`: Caddy, `dns`, PostgreSQL when installed, then each pool |
+//! | `GET /v1/services` | `Vec<ServiceStatus>`: Caddy, `dns`, the database servers that are installed, each pool, then each worker |
 //! | `POST /v1/jobs/services/{id}/{action}` | `202 JobAccepted`; the end is a `job` event with the `ServiceStatus` after the action, or its failure |
 //! | `POST /v1/services/{id}/{action}` | The same job, answered with the `ServiceStatus` when it ends (clients before ADR 0026) |
 //! | `GET /v1/logs/{id}` | `Vec<LogLine>`, the recent lines |
@@ -47,7 +48,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use marsa_core::databases::ServerKind;
 use marsa_core::types::{
-    Event, JobAccepted, JobKind, JobOutcome, LogLine, ServiceAction, ServiceStatus, UnknownAction,
+    Event, JobAccepted, JobKind, JobOutcome, LogLine, ServiceAction, ServiceState, ServiceStatus,
+    UnknownAction,
 };
 use serde::Deserialize;
 use tokio::sync::broadcast;
@@ -147,7 +149,8 @@ struct Checked {
 }
 
 /// The refusals that need no wait: no such service (404), no such action
-/// (400), and a php-fpm pool, which starts and stops with its sites (409).
+/// (400), a php-fpm pool, which starts and stops with its sites (409), and
+/// `start` or `stop` on a worker, which follows its site's setting (409).
 fn check(
     daemon: &Daemon,
     path: Result<Path<(String, String)>, PathRejection>,
@@ -185,7 +188,11 @@ fn follows_site(id: ServiceId) -> HttpError {
 }
 
 /// `restart` on a site's worker: the next pass of the sites sync starts it
-/// again, and the answer waits for that pass.
+/// again, and the answer waits for that pass. A worker that cannot run (no
+/// PHP for its site) is 409 with that code, as a start of Caddy that is not
+/// installed. The waiting route may take longer than its old clients' 60 s:
+/// a pass that stops a queue worker waits up to 30 s for its job, and this
+/// one may wait for such a pass first. The job route has no such limit.
 async fn restart_worker(daemon: &Daemon, id: ServiceId) -> Result<ServiceStatus, HttpError> {
     daemon.workers().ask_restart(id);
     daemon
@@ -205,7 +212,18 @@ async fn restart_worker(daemon: &Daemon, id: ServiceId) -> Result<ServiceStatus,
         .workers()
         .find(id)
         .ok_or_else(|| not_found(&id.to_string()))?;
-    Ok(lock(&runtime).status.clone())
+    let status = lock(&runtime).status.clone();
+    match &status.state {
+        ServiceState::Failed { code } if code == codes::PHP_NOT_INSTALLED => {
+            let message = format!("{id} cannot run: its site has no PHP installed");
+            Err(HttpError::new(
+                StatusCode::CONFLICT,
+                codes::PHP_NOT_INSTALLED,
+                message,
+            ))
+        }
+        _ => Ok(status),
+    }
 }
 
 fn start(daemon: &Arc<Daemon>, checked: Checked) -> (u64, jobs::Ended<ServiceStatus>) {
@@ -244,7 +262,9 @@ async fn run(
                 tracing::warn!(service = %id, %action, code = err.code(), error = %err, "service action failed");
                 action_error(&err)
             }),
-        Service::Worker(_) => restart_worker(&daemon, id).await,
+        Service::Worker(_) if action == ServiceAction::Restart => restart_worker(&daemon, id).await,
+        // Refused by `check`.
+        Service::Worker(_) => Err(follows_site(id)),
         // Refused by `check`.
         Service::Pool(_) => Err(managed_by_sites(id)),
     }
@@ -372,8 +392,8 @@ impl Service<'_> {
     }
 }
 
-/// Service `id`: Caddy, a database server, the DNS server, or a php-fpm
-/// pool started in this run.
+/// Service `id`: Caddy, a database server, the DNS server, a php-fpm pool
+/// started in this run, or a worker its site asks for now.
 fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<(ServiceId, Service<'a>), HttpError> {
     let found = id.parse().ok().and_then(|parsed| {
         let service = match parsed {
@@ -518,7 +538,7 @@ mod tests {
         use axum::http::Request;
         use marsa_core::php::PhpMinor;
         use marsa_core::platform::daemon_file::{Token, daemon_authority};
-        use marsa_core::types::{ErrorBody, ServiceState};
+        use marsa_core::types::ErrorBody;
         use tower::ServiceExt as _;
 
         const PORT: u16 = 51236;
@@ -633,7 +653,7 @@ mod tests {
         use axum::http::Request;
         use marsa_core::config::{self, ConfigPaths, GlobalConfig, ServerSettings};
         use marsa_core::platform::daemon_file::{Token, daemon_authority};
-        use marsa_core::types::{ErrorBody, ServiceState};
+        use marsa_core::types::ErrorBody;
         use tower::ServiceExt as _;
 
         const PORT: u16 = 51237;

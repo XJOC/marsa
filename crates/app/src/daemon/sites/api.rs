@@ -148,8 +148,11 @@ async fn update(
         if let Some(schedule) = patch.schedule {
             next.schedule = schedule;
         }
-        // Turning a worker on needs `artisan`; turning it off never fails.
-        let turns_on = patch.queue == Some(true) || patch.schedule == Some(true);
+        // Turning a worker on needs `artisan`, and so does making a site with
+        // a worker a Node proxy; turning a worker off never fails.
+        let turns_on = patch.queue == Some(true)
+            || patch.schedule == Some(true)
+            || (matches!(patch.proxy, Some(Some(_))) && (next.queue || next.schedule));
         if turns_on && (next.proxy.is_some() || sites::detect(&next.root).kind != SiteKind::Laravel)
         {
             return Err(not_laravel(&name));
@@ -333,7 +336,9 @@ fn not_found(name: &str) -> HttpError {
 }
 
 fn not_laravel(name: &str) -> HttpError {
-    let message = format!("{name} is not a Laravel project (no artisan), so it runs no workers");
+    let message = format!(
+        "{name} is not a Laravel project served by PHP (no artisan, or a Node proxy), so it runs no workers"
+    );
     HttpError::new(StatusCode::CONFLICT, codes::SITE_NOT_LARAVEL, message)
 }
 

@@ -104,7 +104,7 @@ mod real {
 
     /// A fake PHP CLI: prints how it was run, then fails while the site has a
     /// file `fail`, or runs until stopped.
-    const FAKE_PHP: &str = "#!/bin/sh\n\
+    pub(super) const FAKE_PHP: &str = "#!/bin/sh\n\
         echo \"fake $0 $*\"\n\
         if [ -f fail ]; then exit 1; fi\n\
         exec sleep 600\n";
@@ -141,7 +141,7 @@ mod real {
         }
     }
 
-    fn install_php(data: &Path, version: &str) {
+    pub(super) fn install_php(data: &Path, version: &str) {
         let bin = data.join("runtimes/php").join(version).join("bin");
         fs::create_dir_all(&bin).unwrap();
         let php = bin.join("php");
@@ -566,12 +566,27 @@ mod routes {
             let uri = format!("/v1/jobs/services/queue-shop/{action}");
             assert_eq!(app.refused("POST", &uri, None).await, refused);
         }
+        // A restart that cannot start it says why, on both routes.
+        let no_php = (StatusCode::CONFLICT, codes::PHP_NOT_INSTALLED.to_owned());
+        let restart = "/v1/services/queue-shop/restart";
+        assert_eq!(app.refused("POST", restart, None).await, no_php);
         let (status, json) = app
-            .answer("POST", "/v1/services/queue-shop/restart", None)
+            .answer("POST", "/v1/jobs/services/queue-shop/restart", None)
             .await;
-        assert_eq!(status, StatusCode::OK, "{json}");
-        let after: ServiceStatus = serde_json::from_value(json).unwrap();
-        assert_eq!(after.state, failed);
+        assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+        let job = format!("/v1/jobs/{}", json["id"]);
+        let ended = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let (_, json) = app.answer("GET", &job, None).await;
+                if json["status"] != "running" {
+                    return json;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let ended = ended.await.expect("the job ended in time");
+        assert_eq!(ended["status"], "failed", "{ended}");
+        assert_eq!(ended["code"], codes::PHP_NOT_INSTALLED, "{ended}");
 
         // No worker for another site, nor for a name that is not a site name.
         let not_found = (StatusCode::NOT_FOUND, codes::SERVICE_NOT_FOUND.to_owned());
@@ -599,17 +614,65 @@ mod routes {
             let got = app.refused("PATCH", "/v1/sites/blog", Some(body)).await;
             assert_eq!(got, not_laravel);
         }
-        // Off is always fine.
-        app.patch("blog", json!({ "queue": false })).await;
-        // A Node proxy is not served by Laravel, even with `artisan`.
+        // A Node proxy is not served by Laravel, even with `artisan`, and a
+        // site with a worker does not become one.
         let body = json!({ "proxy": 5173, "queue": true });
         let got = app.refused("PATCH", "/v1/sites/shop", Some(body)).await;
         assert_eq!(got, not_laravel);
         let list = app.patch("shop", json!({ "schedule": true })).await;
+        let body = json!({ "proxy": 5173 });
+        let got = app.refused("PATCH", "/v1/sites/shop", Some(body)).await;
+        assert_eq!(got, not_laravel);
+        // Off is always fine, also once the site lost `artisan`.
+        fs::remove_file(app.temp.path().join("shop/artisan")).unwrap();
+        let off = app.patch("shop", json!({ "schedule": false })).await;
+        assert!(off.sites.iter().all(|site| !site.schedule));
         assert!(
             list.sites
                 .iter()
                 .any(|site| site.name == "shop" && site.schedule)
         );
+    }
+
+    #[tokio::test]
+    async fn a_restart_without_a_sync_pass_is_an_internal_error() {
+        let app = App::new().await;
+        let id = ServiceId::Worker(WorkerKind::Queue, SiteKey::new("shop").unwrap());
+        app.daemon.workers().runtime(id);
+        let (status, json) = app
+            .answer("POST", "/v1/services/queue-shop/restart", None)
+            .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{json}");
+        assert_eq!(json["error"]["code"], codes::INTERNAL_ERROR);
+    }
+
+    // The fake PHP is a shell script: Unix only, as `real`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_restart_on_the_route_starts_a_running_worker_again() {
+        let app = App::new().await;
+        super::real::install_php(app.daemon.data_dir(), "8.4.1");
+        let sync = sync::start(&app.daemon);
+        // The patch builds the list again, which now finds the PHP.
+        app.patch("shop", json!({ "php": "8.4", "queue": true }))
+            .await;
+        let running = |s: &ServiceStatus| s.state == ServiceState::Running && s.pid.is_some();
+        let first = app
+            .wait_services(|services| worker(services).is_some_and(running))
+            .await;
+        let first = worker(&first).unwrap().clone();
+        let (status, json) = app
+            .answer("POST", "/v1/services/queue-shop/restart", None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let again = app
+            .wait_services(|services| {
+                worker(services).is_some_and(|s| running(s) && s.pid != first.pid)
+            })
+            .await;
+        assert_eq!(worker(&again).unwrap().restarts, 0);
+        app.daemon.shutdown().cancel();
+        sync.stop().await;
+        app.daemon.stop_procs(Duration::from_secs(30)).await;
     }
 }
