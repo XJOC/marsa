@@ -231,7 +231,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn opening_mail_reads_the_list_and_offline_it_asks_for_nothing() {
         let mut model = connected();
         let sent = command(model.apply_action(Action::Navigate(Route::Mail)));
@@ -250,8 +249,6 @@ mod tests {
     }
 
     #[test]
-=======
->>>>>>> origin/main
     fn choosing_a_mail_reads_its_text_and_marks_it_read_at_once() {
         let mut model = with_list();
         let sent = command(model.apply_action(Action::ChooseMail("a1".into())));
