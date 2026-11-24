@@ -28,12 +28,12 @@ use marsa_core::platform::daemon_file::{
 };
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
-    API_VERSION, AutostartState, DefaultVersion, ErrorBody, Event, Health, InstallAccepted,
-    InstallRequest, JobAccepted, JobEvent, JobFailure, JobKind, JobOutcome, JobStep, JobUpdate,
-    LinkRequest, LogLine, LogStream, OpName, OpResult, OpStatus, ParkRequest, RuntimeList,
-    RuntimeVersions, ServiceAction, ServiceState, ServiceStatus, SetupReport, SetupSkip, Site,
-    SiteKind, SiteList, SitePatch, SkippedFolder, Source, UninstallReport, Uninstalled,
-    VersionInUse, XdebugState,
+    API_VERSION, AutostartState, DefaultVersion, Dump, DumpList, DumpsCapture, DumpsStatus,
+    ErrorBody, Event, Health, InstallAccepted, InstallRequest, JobAccepted, JobEvent, JobFailure,
+    JobKind, JobOutcome, JobStep, JobUpdate, LinkRequest, LogLine, LogStream, OpName, OpResult,
+    OpStatus, ParkRequest, RuntimeList, RuntimeVersions, ServiceAction, ServiceState,
+    ServiceStatus, SetupReport, SetupSkip, Site, SiteKind, SiteList, SitePatch, SkippedFolder,
+    Source, UninstallReport, Uninstalled, VersionInUse, XdebugState,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1498,6 +1498,71 @@ async fn xdebug_reads_and_puts() {
     assert_eq!(*bodies.lock().unwrap(), [sent]);
     let targets = fake.targets();
     assert_eq!(targets, ["GET /v1/php/xdebug", "PUT /v1/php/xdebug"]);
+}
+
+// ---------------------------------------------------------------------------
+// Dumps
+
+#[tokio::test]
+async fn dumps_are_listed_after_an_id_cleared_and_switched() {
+    let dump = Dump {
+        id: 5,
+        received_at: 1,
+        source_file: Some("/app/routes/web.php".into()),
+        source_line: Some(3),
+        uri: None,
+        method: None,
+        label: None,
+        text: "\"hi\"".into(),
+        truncated: false,
+    };
+    let list = DumpList {
+        status: DumpsStatus::Listening,
+        latest_id: 5,
+        dumps: vec![dump],
+    };
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new()
+        .route(
+            "/v1/dumps",
+            get({
+                let list = list.clone();
+                move || async move { Json(list) }
+            })
+            .delete(|| async { Json(DumpList::default()) }),
+        )
+        .route(
+            "/v1/dumps/capture",
+            get(|| async { Json(DumpsCapture { enabled: true }) }).put({
+                let bodies = bodies.clone();
+                move |Json(body): Json<serde_json::Value>| async move {
+                    bodies.lock().expect("lock").push(body);
+                    Json(DumpsCapture { enabled: false })
+                }
+            }),
+        );
+    let fake = Fake::start(router).await;
+    let client = fake.client();
+    assert_eq!(client.dumps(None).await.unwrap(), list);
+    assert_eq!(client.dumps(Some(4)).await.unwrap(), list);
+    assert_eq!(client.clear_dumps().await.unwrap(), DumpList::default());
+    assert!(client.dumps_capture().await.unwrap().enabled);
+    assert!(!client.set_dumps_capture(false).await.unwrap().enabled);
+
+    assert_eq!(
+        *bodies.lock().unwrap(),
+        [serde_json::json!({ "enabled": false })]
+    );
+    assert_eq!(
+        fake.targets(),
+        [
+            "GET /v1/dumps",
+            "GET /v1/dumps?after=4",
+            "DELETE /v1/dumps",
+            "GET /v1/dumps/capture",
+            "PUT /v1/dumps/capture"
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
