@@ -334,23 +334,26 @@ impl WorkerManager {
                 _ => None,
             })
             .collect();
-        for ((id, plan), (_, check)) in start.into_iter().zip(checks) {
-            let before = check.await;
-            // A worker kept from starting by its old run is not tried again
-            // at each pass, which would wait for it each time: `restart`
-            // tries again.
-            if self.start(daemon, plan, before) || daemon.workers().failed_stuck(id) {
-                self.running.insert(id, plan.clone());
-            }
+        // Every check ends before any worker starts: a check reads the
+        // daemon's children once, and must not miss one it just started.
+        let mut befores = Vec::new();
+        for (_, check) in checks {
+            befores.push(check.await);
         }
-        // After the starts: an old worker of a site that no longer asks for
-        // it must not hold up the ones that are wanted.
         for (id, check) in sweeps {
             match check.await {
                 Ok(Before::Clear) => {}
                 Ok(Before::Note(text)) => info!(service = %id, "{text}"),
                 Ok(Before::Stuck(text)) => warn!(service = %id, "{text}"),
                 Err(err) => warn!(service = %id, error = %err, "the orphan check failed"),
+            }
+        }
+        for ((id, plan), before) in start.into_iter().zip(befores) {
+            // A worker kept from starting by its old run is not tried again
+            // at each pass, which would wait for it each time: `restart`
+            // tries again.
+            if self.start(daemon, plan, before) || daemon.workers().failed_stuck(id) {
+                self.running.insert(id, plan.clone());
             }
         }
     }

@@ -147,7 +147,11 @@ impl PidFile {
                 return Recorded::Never;
             }
             None => {
-                warn!(pid, "pid file not written: not a child of the daemon");
+                warn!(
+                    pid,
+                    path = %self.path.display(),
+                    "pid file not written: not a child of the daemon"
+                );
                 return Recorded::Never;
             }
         }

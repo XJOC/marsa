@@ -78,7 +78,8 @@ pub(super) async fn clear(
     // after a reboot on Linux, where start times count from the boot, an
     // old record of another worker could name it. A layer on top of the
     // checks of `clear`, looked at once: a list that cannot be read leaves
-    // them alone, and the checks of a pass end before its workers start.
+    // them alone, and every check of a pass ends before its first worker
+    // starts (`WorkerManager::sync`).
     if let Some(record) = process::read_pid_file(&path)
         && probes
             .children(std::process::id())
@@ -395,15 +396,18 @@ mod tests {
         assert!(recorded_workers(&temp.path().join("none")).is_empty());
     }
 
-    /// Kills the process at the end of a test, whatever happened.
-    struct KillOnDrop(u32);
+    /// Kills the process at the end of a test that failed before it was
+    /// gone. Disarmed once it is gone: its pid may be someone else's then.
+    struct KillOnDrop(Option<u32>);
 
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
-            let _ = std::process::Command::new("/bin/kill")
-                .args(["-KILL", &self.0.to_string()])
-                .stderr(std::process::Stdio::null())
-                .status();
+            if let Some(pid) = self.0.take() {
+                let _ = std::process::Command::new("/bin/kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
         }
     }
 
@@ -424,7 +428,8 @@ mod tests {
         std::os::unix::fs::symlink(sleep, &link).unwrap();
         let php = std::fs::canonicalize(&link).unwrap();
         // Started by a shell that ends at once, so the orphan's parent is not
-        // this process, which stands for the daemon.
+        // this process, which stands for the daemon. A fixed shell line, in a
+        // test only, with the path as `$0`: the product never builds one.
         let started = std::process::Command::new("/bin/sh")
             .args(["-c", "\"$0\" 600 >/dev/null 2>&1 & echo $!"])
             .arg(&link)
@@ -435,7 +440,7 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        let _kill = KillOnDrop(pid);
+        let mut kill = KillOnDrop(Some(pid));
         let identity = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Liveness::Alive { exe, started } = process::real_identity(pid).await
@@ -459,6 +464,7 @@ mod tests {
         };
         assert!(text.contains(&format!("(pid {pid})")), "{text}");
         assert_eq!(process::real_identity(pid).await, Liveness::Gone);
+        kill.0 = None;
         assert!(!pid_path(temp.path(), queue()).exists());
     }
 }

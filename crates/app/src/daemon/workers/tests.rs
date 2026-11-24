@@ -516,17 +516,21 @@ mod real {
             data.join("runtimes/php/8.4.1/bin/php")
         }
 
-        /// Kills the process at the end of a test, whatever happened.
-        struct KillOnDrop(u32);
+        /// Kills the process at the end of a test that failed before it
+        /// was gone. Disarmed once it is gone: its pid may be someone
+        /// else's then.
+        struct KillOnDrop(Option<u32>);
 
         impl Drop for KillOnDrop {
             fn drop(&mut self) {
                 // No assert: a panic here, while a failed test unwinds,
                 // would abort the run.
-                let _ = std::process::Command::new("/bin/kill")
-                    .args(["-KILL", &self.0.to_string()])
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                if let Some(pid) = self.0.take() {
+                    let _ = std::process::Command::new("/bin/kill")
+                        .args(["-KILL", &pid.to_string()])
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
             }
         }
 
@@ -584,7 +588,8 @@ mod real {
             install_php(&data, "8.4.1");
             manager.probes = Arc::new(AsPhp { php: php(&data) });
             // The old worker: started by a shell that ends at once, so its
-            // parent is not this process, which stands for the daemon.
+            // parent is not this process, which stands for the daemon. A
+            // fixed shell line, in a test only, with the path as `$0`.
             let started = std::process::Command::new("/bin/sh")
                 .args([
                     "-c",
@@ -600,7 +605,7 @@ mod real {
                 .parse()
                 .unwrap();
             // Killed even when an assert fails: it is no child of this test.
-            let _kill = KillOnDrop(old);
+            let mut kill = KillOnDrop(Some(old));
             let identity = tokio::time::timeout(WAIT, async {
                 loop {
                     if let Liveness::Alive { started, .. } = process::real_identity(old).await {
@@ -619,6 +624,7 @@ mod real {
             let on = site(&root, SiteKind::Laravel, Some("8.4.1"), true, false);
             manager.sync(&daemon, &[on]).await;
             gone(old).await;
+            kill.0 = None;
             let new = wait_for(&daemon, running).await;
             assert_ne!(new.pid, Some(old));
             wait_line(
