@@ -351,3 +351,182 @@ mod real {
         gone(second.pid.unwrap()).await;
     }
 }
+
+/// The routes of a worker, through the real router and the real sync task,
+/// with no PHP installed: the worker is listed `php_not_installed` and no
+/// process ever runs, so this runs on every OS.
+mod routes {
+    use super::*;
+    use std::sync::Arc;
+
+    use axum::http::StatusCode;
+    use marsa_core::config::ConfigPaths;
+    use marsa_core::types::{ErrorBody, SiteList};
+    use serde_json::{Value, json};
+
+    use crate::daemon::http::test_router::TestRouter;
+    use crate::daemon::sites::sync;
+
+    struct App {
+        temp: TempDir,
+        daemon: Arc<Daemon>,
+        router: TestRouter,
+    }
+
+    impl App {
+        /// A daemon with `shop` (Laravel) and `blog` (plain PHP) linked.
+        async fn new() -> Self {
+            let temp = TempDir::new().unwrap();
+            let daemon = Arc::new(Daemon::new(temp.path().join("data")));
+            let app = Self {
+                router: TestRouter::new(Arc::clone(&daemon)),
+                daemon,
+                temp,
+            };
+            for (name, laravel) in [("shop", true), ("blog", false)] {
+                let root = app.temp.path().join(name);
+                fs::create_dir_all(root.join("public")).unwrap();
+                fs::write(root.join("public/index.php"), "<?php\n").unwrap();
+                if laravel {
+                    fs::write(root.join("artisan"), "<?php\n").unwrap();
+                }
+                let body = json!({ "name": name, "path": root });
+                let (status, json) = app.answer("POST", "/v1/sites/link", Some(body)).await;
+                assert_eq!(status, StatusCode::OK, "{json}");
+            }
+            app
+        }
+
+        async fn answer(
+            &self,
+            method: &str,
+            uri: &str,
+            body: Option<Value>,
+        ) -> (StatusCode, Value) {
+            self.router.answer(method, uri, body).await
+        }
+
+        async fn refused(
+            &self,
+            method: &str,
+            uri: &str,
+            body: Option<Value>,
+        ) -> (StatusCode, String) {
+            let (status, json) = self.answer(method, uri, body).await;
+            let error: ErrorBody = serde_json::from_value(json).unwrap();
+            (status, error.error.code)
+        }
+
+        async fn patch(&self, name: &str, body: Value) -> SiteList {
+            let uri = format!("/v1/sites/{name}");
+            let (status, json) = self.answer("PATCH", &uri, Some(body)).await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            serde_json::from_value(json).unwrap()
+        }
+
+        async fn services(&self) -> Vec<ServiceStatus> {
+            let (status, json) = self.answer("GET", "/v1/services", None).await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            serde_json::from_value(json).unwrap()
+        }
+
+        /// Waits until the list of services passes `ok`.
+        async fn wait_services(&self, ok: impl Fn(&[ServiceStatus]) -> bool) -> Vec<ServiceStatus> {
+            let wait = async {
+                loop {
+                    let services = self.services().await;
+                    if ok(&services) {
+                        return services;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(30), wait)
+                .await
+                .expect("the services in time")
+        }
+    }
+
+    fn worker(services: &[ServiceStatus]) -> Option<&ServiceStatus> {
+        services
+            .iter()
+            .find(|status| status.id.to_string() == "queue-shop")
+    }
+
+    #[tokio::test]
+    async fn a_worker_follows_its_sites_setting_and_takes_only_restart() {
+        let app = App::new().await;
+        let sync = sync::start(&app.daemon);
+
+        let list = app.patch("shop", json!({ "queue": true })).await;
+        let shop = list.sites.iter().find(|site| site.name == "shop").unwrap();
+        assert!(shop.queue && !shop.schedule);
+        let sites_toml =
+            fs::read_to_string(ConfigPaths::in_dir(app.daemon.data_dir()).sites).unwrap();
+        assert!(sites_toml.contains("queue = true"), "{sites_toml}");
+
+        let failed = ServiceState::Failed {
+            code: codes::PHP_NOT_INSTALLED.to_owned(),
+        };
+        let services = app
+            .wait_services(|services| worker(services).is_some_and(|s| s.state == failed))
+            .await;
+        assert_eq!(worker(&services).unwrap().pid, None);
+        let (status, json) = app.answer("GET", "/v1/logs/queue-shop", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json.to_string().contains("php_not_installed"), "{json}");
+
+        for action in ["start", "stop"] {
+            let refused = (StatusCode::CONFLICT, codes::WORKER_FOLLOWS_SITE.to_owned());
+            let uri = format!("/v1/services/queue-shop/{action}");
+            assert_eq!(app.refused("POST", &uri, None).await, refused);
+            let uri = format!("/v1/jobs/services/queue-shop/{action}");
+            assert_eq!(app.refused("POST", &uri, None).await, refused);
+        }
+        let (status, json) = app
+            .answer("POST", "/v1/services/queue-shop/restart", None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let after: ServiceStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(after.state, failed);
+
+        // No worker for another site, nor for a name that is not a site name.
+        let not_found = (StatusCode::NOT_FOUND, codes::SERVICE_NOT_FOUND.to_owned());
+        for id in ["queue-blog", "schedule-shop", "queue-Shop"] {
+            let uri = format!("/v1/services/{id}/restart");
+            assert_eq!(app.refused("POST", &uri, None).await, not_found, "{id}");
+        }
+
+        app.patch("shop", json!({ "queue": false })).await;
+        app.wait_services(|services| worker(services).is_none())
+            .await;
+        let sites_toml =
+            fs::read_to_string(ConfigPaths::in_dir(app.daemon.data_dir()).sites).unwrap();
+        assert!(!sites_toml.contains("queue"), "{sites_toml}");
+
+        app.daemon.shutdown().cancel();
+        sync.stop().await;
+    }
+
+    #[tokio::test]
+    async fn only_a_laravel_site_turns_a_worker_on() {
+        let app = App::new().await;
+        let not_laravel = (StatusCode::CONFLICT, codes::SITE_NOT_LARAVEL.to_owned());
+        for body in [json!({ "queue": true }), json!({ "schedule": true })] {
+            let got = app.refused("PATCH", "/v1/sites/blog", Some(body)).await;
+            assert_eq!(got, not_laravel);
+        }
+        // Off is always fine.
+        app.patch("blog", json!({ "queue": false })).await;
+        // A Node proxy is not served by Laravel, even with `artisan`.
+        let body = json!({ "proxy": 5173, "queue": true });
+        let got = app.refused("PATCH", "/v1/sites/shop", Some(body)).await;
+        assert_eq!(got, not_laravel);
+        let list = app.patch("shop", json!({ "schedule": true })).await;
+        assert!(
+            list.sites
+                .iter()
+                .any(|site| site.name == "shop" && site.schedule)
+        );
+    }
+}

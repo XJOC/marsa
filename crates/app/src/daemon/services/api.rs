@@ -9,9 +9,13 @@
 //! | `GET /v1/logs/{id}?follow=true` | SSE: the recent lines, then new ones |
 //!
 //! The services are `caddy`, `dns` on macOS and Linux (the daemon's own DNS
-//! server), and each php-fpm pool started in this run
-//! (`php-fpm-8.4`). The sites sync starts and stops the pools, so an action
-//! on a pool is `409 service_managed_by_sites`.
+//! server), each php-fpm pool started in this run
+//! (`php-fpm-8.4`), and each site's worker that its site asks for
+//! (`queue-shop`, `schedule-shop`). The sites sync starts and stops the
+//! pools, so an action on a pool is `409 service_managed_by_sites`. It runs
+//! the workers too: a worker runs while its site's setting asks for it, so
+//! `start` and `stop` on one are `409 worker_follows_site`; `restart` asks
+//! the sync to start it again, also after its restarts ran out.
 //!
 //! An action on Caddy that finds another one running waits for it, up to
 //! [`ACTION_WAIT`], then runs; a wait that runs out is still
@@ -58,6 +62,7 @@ use super::supervisor::{ServiceRuntime, lock};
 use crate::daemon::http::Rejected as _;
 use crate::daemon::http::routes::HttpError;
 use crate::daemon::jobs;
+use crate::daemon::sites::sync::PassNotRun;
 use crate::daemon::state::Daemon;
 
 /// The answer to an action on a service that the sites sync starts and stops.
@@ -108,6 +113,7 @@ async fn services(State(daemon): State<Arc<Daemon>>) -> Json<Vec<ServiceStatus>>
         }
     }
     services.extend(daemon.pools().statuses());
+    services.extend(daemon.workers().statuses());
     Json(services)
 }
 
@@ -151,8 +157,12 @@ fn check(
     let action: ServiceAction = action.parse().map_err(|err: UnknownAction| {
         HttpError::new(StatusCode::BAD_REQUEST, err.code(), err.to_string())
     })?;
-    if let Service::Pool(_) = service {
-        return Err(managed_by_sites(service_id));
+    match service {
+        Service::Pool(_) => return Err(managed_by_sites(service_id)),
+        Service::Worker(_) if action != ServiceAction::Restart => {
+            return Err(follows_site(service_id));
+        }
+        _ => {}
     }
     Ok(Checked { id, action })
 }
@@ -164,6 +174,38 @@ fn managed_by_sites(id: ServiceId) -> HttpError {
          its own"
     );
     HttpError::new(StatusCode::CONFLICT, MANAGED_BY_SITES, message)
+}
+
+/// The 409 for `start` or `stop` on a site's worker.
+fn follows_site(id: ServiceId) -> HttpError {
+    let message = format!(
+        "{id} runs while its site's setting asks for it; turn the setting on or off instead"
+    );
+    HttpError::new(StatusCode::CONFLICT, codes::WORKER_FOLLOWS_SITE, message)
+}
+
+/// `restart` on a site's worker: the next pass of the sites sync starts it
+/// again, and the answer waits for that pass.
+async fn restart_worker(daemon: &Daemon, id: ServiceId) -> Result<ServiceStatus, HttpError> {
+    daemon.workers().ask_restart(id);
+    daemon
+        .pass_requests()
+        .run_pass()
+        .await
+        .map_err(|PassNotRun| {
+            let message = "the daemon stops: the worker was not started again";
+            HttpError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                codes::INTERNAL_ERROR,
+                message,
+            )
+        })?;
+    // Gone if its site stopped asking for it in the meantime.
+    let runtime = daemon
+        .workers()
+        .find(id)
+        .ok_or_else(|| not_found(&id.to_string()))?;
+    Ok(lock(&runtime).status.clone())
 }
 
 fn start(daemon: &Arc<Daemon>, checked: Checked) -> (u64, jobs::Ended<ServiceStatus>) {
@@ -202,6 +244,7 @@ async fn run(
                 tracing::warn!(service = %id, %action, code = err.code(), error = %err, "service action failed");
                 action_error(&err)
             }),
+        Service::Worker(_) => restart_worker(&daemon, id).await,
         // Refused by `check`.
         Service::Pool(_) => Err(managed_by_sites(id)),
     }
@@ -313,6 +356,8 @@ enum Service<'a> {
     Dns(&'a DnsService),
     /// A php-fpm pool: the routes only read it.
     Pool(Arc<Mutex<ServiceRuntime>>),
+    /// A site's worker: the routes read it, and ask the sync to restart it.
+    Worker(Arc<Mutex<ServiceRuntime>>),
 }
 
 impl Service<'_> {
@@ -322,7 +367,7 @@ impl Service<'_> {
             Service::Caddy(caddy) => caddy.recent_logs(),
             Service::Server(server) => server.recent_logs(),
             Service::Dns(dns) => dns.recent_logs(),
-            Service::Pool(runtime) => lock(runtime).logs.recent(),
+            Service::Pool(runtime) | Service::Worker(runtime) => lock(runtime).logs.recent(),
         }
     }
 }
@@ -336,15 +381,16 @@ fn service<'a>(daemon: &'a Daemon, id: &str) -> Result<(ServiceId, Service<'a>),
             ServiceId::Database(kind) => Some(Service::Server(daemon.server(kind))),
             ServiceId::Dns => daemon.dns().listed().then_some(Service::Dns(daemon.dns())),
             ServiceId::Pool(..) => daemon.pools().find(parsed).map(Service::Pool),
-            // Not run yet: the workers manager comes with the sites sync.
-            ServiceId::Worker(..) => None,
+            ServiceId::Worker(..) => daemon.workers().find(parsed).map(Service::Worker),
         };
         service.map(|service| (parsed, service))
     });
-    found.ok_or_else(|| {
-        let message = format!("no service named {id:?}");
-        HttpError::new(StatusCode::NOT_FOUND, codes::SERVICE_NOT_FOUND, message)
-    })
+    found.ok_or_else(|| not_found(id))
+}
+
+fn not_found(id: &str) -> HttpError {
+    let message = format!("no service named {id:?}");
+    HttpError::new(StatusCode::NOT_FOUND, codes::SERVICE_NOT_FOUND, message)
 }
 
 fn action_error(err: &ActionError) -> HttpError {
