@@ -179,6 +179,33 @@ $db->exec("insert into migrations (migration) values (\x27create_users_table\x27
 echo $db->query("select count(*) from migrations")->fetchColumn(), "\n";
 ' | grep -qx 1 || fail "pdo_pgsql"
 
+step "the database browser: app and its tables, none of the server's own, and a close that closes"
+# shellcheck source=api.sh
+source "$(dirname "$0")/api.sh"
+sources=$(api_ok GET /v1/db/sources)
+[ "$(jq -r '.servers[] | select(.server == "postgres") | .state' <<<"$sources")" = running ] || fail "sources: $sources"
+names=$(jq -c '[.servers[] | select(.server == "postgres") | .databases[].name]' <<<"$sources")
+echo "databases: $names"
+jq -e 'index("app") != null and all(.[]; IN("postgres", "template0", "template1") | not)' <<<"$names" >/dev/null ||
+  fail "databases: $names"
+tables=$(api_ok POST /v1/db/tables '{"source": {"kind": "server", "server": "postgres", "database": "app"}}')
+echo "tables: $(jq -c '[.tables[] | [.table.schema, .table.name, .kind]]' <<<"$tables")"
+jq -e '[.tables[] | select(.table.schema == "public" and .kind == "table") | .table.name] | index("posts") != null and index("migrations") != null' \
+  <<<"$tables" >/dev/null || fail "tables: $tables"
+jq -e 'all(.tables[]; .table.schema | startswith("pg_") | not)' <<<"$tables" >/dev/null || fail "a system schema is listed"
+[ "$(api_status POST /v1/db/tables '{"source": {"kind": "server", "server": "postgres", "database": "postgres"}}')" = "404 db_not_found" ] ||
+  fail "a system database was opened"
+# One connection for each source (the server's catalog, and app), no pool,
+# each read-only.
+others="select count(*) from pg_stat_activity where application_name = 'marsa'"
+[ "$(tcp -U root -d postgres -c "$others")" = 2 ] || fail "$(tcp -U root -d postgres -c "$others") browser connections, not 2"
+api_ok POST /v1/db/close >/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ "$(tcp -U root -d postgres -c "$others")" = 0 ] && break
+  sleep 0.5
+done
+[ "$(tcp -U root -d postgres -c "$others")" = 0 ] || fail "a browser connection stayed open after close"
+
 step "the running version cannot be uninstalled; its databases stay"
 refused 'in use' marsa uninstall postgres "$VERSION"
 [ -d "$PG" ] || fail "the running version was removed"

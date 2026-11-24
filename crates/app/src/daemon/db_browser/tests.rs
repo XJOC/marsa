@@ -21,6 +21,7 @@ const ROUTES: [(&str, &str); 3] = [
 
 struct App {
     dir: TempDir,
+    daemon: Arc<Daemon>,
     router: TestRouter,
 }
 
@@ -29,8 +30,13 @@ impl App {
         let dir = tempfile::tempdir().expect("temp dir");
         let data = dir.path().join("data");
         fs::create_dir_all(&data).unwrap();
-        let router = TestRouter::new(Arc::new(Daemon::new(data)));
-        Self { dir, router }
+        let daemon = Arc::new(Daemon::new(data));
+        let router = TestRouter::new(Arc::clone(&daemon));
+        Self {
+            dir,
+            daemon,
+            router,
+        }
     }
 
     /// A linked site `name` with an empty project folder.
@@ -92,6 +98,40 @@ async fn with_no_site_and_no_server_there_is_nothing_to_open() {
     let (status, json) = app.router.answer("GET", "/v1/db/sources", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json, json!({ "servers": [], "files": [] }));
+}
+
+/// A server that is installed and stopped is listed with its state, and no
+/// connection is tried: the browser is not even made.
+#[tokio::test]
+async fn an_installed_server_that_does_not_run_is_listed_without_a_connection() {
+    let app = App::new();
+    let version = app
+        .dir
+        .path()
+        .join("data")
+        .join("runtimes")
+        .join("mysql")
+        .join("8.4.13");
+    fs::create_dir_all(version).unwrap();
+    let (status, json) = app.router.answer("GET", "/v1/db/sources", None).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let servers = json["servers"].as_array().unwrap();
+    assert_eq!(servers.len(), 1, "{json}");
+    assert_eq!(servers[0]["server"], "mysql");
+    assert_eq!(servers[0]["state"], "stopped");
+    assert_eq!(servers[0]["databases"], json!([]));
+    assert!(servers[0].get("problem").is_none(), "{json}");
+    assert!(app.daemon.open_db_browser().is_none());
+
+    let body = json!({ "kind": "server", "server": "mysql", "database": "shop" });
+    let (status, json) = app.tables(body).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(json["error"]["code"], "db_server_not_running");
+    assert!(app.daemon.open_db_browser().is_none());
+
+    // Close makes nothing either.
+    app.router.send("POST", "/v1/db/close", None).await;
+    assert!(app.daemon.open_db_browser().is_none());
 }
 
 #[tokio::test]
