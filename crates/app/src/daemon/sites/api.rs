@@ -5,7 +5,7 @@
 //! | `GET /v1/sites` | – | `SiteList` |
 //! | `POST /v1/sites/park` | `ParkRequest` | `SiteList` after the change |
 //! | `POST /v1/sites/link` | `LinkRequest` | `SiteList` after the change |
-//! | `PATCH /v1/sites/{name}` | `SitePatch` | `SiteList` after the change |
+//! | `PATCH /v1/sites/{name}` | `SitePatch` | `SiteList` after the change; `queue` or `schedule` on for a site that is not Laravel: 409 `site_not_laravel` |
 //! | `DELETE /v1/sites/{name}` | – | `SiteList` after the change |
 //! | `DELETE /v1/sites/park` | `ParkRequest` | `SiteList` after the change |
 //! | `GET /v1/sites/{name}/log` | – | `SiteLog`, or SSE with `?follow=true` (module `log`) |
@@ -34,7 +34,7 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use marsa_core::config::{SiteSettings, SitesConfig};
 use marsa_core::resolver;
-use marsa_core::sites::{self, SiteError};
+use marsa_core::sites::{self, SiteError, SiteKind};
 use marsa_core::types::{LinkRequest, ParkRequest, SiteList, SitePatch};
 
 use super::SitesError;
@@ -141,6 +141,21 @@ async fn update(
         }
         if let Some(proxy) = patch.proxy {
             next.proxy = proxy.map(NonZeroU16::get);
+        }
+        if let Some(queue) = patch.queue {
+            next.queue = queue;
+        }
+        if let Some(schedule) = patch.schedule {
+            next.schedule = schedule;
+        }
+        // Turning a worker on needs `artisan`, and so does making a site with
+        // a worker a Node proxy; turning a worker off never fails.
+        let turns_on = patch.queue == Some(true)
+            || patch.schedule == Some(true)
+            || (matches!(patch.proxy, Some(Some(_))) && (next.queue || next.schedule));
+        if turns_on && (next.proxy.is_some() || sites::detect(&next.root).kind != SiteKind::Laravel)
+        {
+            return Err(not_laravel(&name));
         }
         if sites_toml.sites.get(&name) == Some(&next) {
             return Ok(false);
@@ -318,6 +333,13 @@ fn site_error(err: &SiteError) -> HttpError {
 fn not_found(name: &str) -> HttpError {
     let message = format!("no site named {name:?}");
     HttpError::new(StatusCode::NOT_FOUND, codes::SITE_NOT_FOUND, message)
+}
+
+fn not_laravel(name: &str) -> HttpError {
+    let message = format!(
+        "{name} is not a Laravel project served by PHP (no artisan, or a Node proxy), so it runs no workers"
+    );
+    HttpError::new(StatusCode::CONFLICT, codes::SITE_NOT_LARAVEL, message)
 }
 
 fn site_is_parked(name: &str, dir: &Path) -> HttpError {
