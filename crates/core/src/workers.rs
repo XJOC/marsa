@@ -65,11 +65,16 @@ pub fn worker_spec(kind: WorkerKind, site: SiteKey, paths: WorkerPaths<'_>) -> S
         env_remove: Vec::new(),
         cwd: Some(paths.root.to_owned()),
         restart: RESTART,
-        stop: StopMethod::term(match kind {
-            WorkerKind::Queue => QUEUE_GRACE,
-            WorkerKind::Schedule => SCHEDULE_GRACE,
-        }),
+        stop: stop_method(kind),
     }
+}
+
+/// How a worker of `kind` stops: SIGTERM, then a kill after its grace.
+pub fn stop_method(kind: WorkerKind) -> StopMethod {
+    StopMethod::term(match kind {
+        WorkerKind::Queue => QUEUE_GRACE,
+        WorkerKind::Schedule => SCHEDULE_GRACE,
+    })
 }
 
 #[cfg(test)]
