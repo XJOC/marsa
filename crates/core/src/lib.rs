@@ -5,6 +5,7 @@
 //! the `full` feature: `platform`, `installer`, and `client`. `setup` is behind
 //! `full` too, but it is pure: it needs the helper's certificate parser.
 
+mod base64;
 pub mod caddy;
 pub mod codes;
 pub mod config;

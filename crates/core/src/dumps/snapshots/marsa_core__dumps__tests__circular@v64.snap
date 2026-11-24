@@ -1,0 +1,23 @@
+---
+source: crates/core/src/dumps/tests.rs
+expression: "describe(\"circular\", version)"
+---
+--- dump 1 ---
+source: /app/routes/web.php:33
+request: - -
+label: -
+truncated: false
+User {#2
+  +name: "Omar"
+  #age: 40
+  -secret: "s3cr3t"
+  +tags: array:2 [
+    0 => "php"
+    1 => "rust"
+  ]
+  +address: Address {#5
+    +city: "Riyadh"
+    +zip: null
+  }
+  +self: User {#2}
+}

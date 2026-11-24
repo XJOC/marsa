@@ -1,0 +1,10 @@
+---
+source: crates/core/src/dumps/tests.rs
+expression: "describe(\"binary\", version)"
+---
+--- dump 1 ---
+source: /app/routes/web.php:39
+request: - -
+label: -
+truncated: false
+b"a\x00bÿþ\x01c"

@@ -1,0 +1,10 @@
+---
+source: crates/core/src/dumps/tests.rs
+expression: "describe(\"utf8\", version)"
+---
+--- dump 1 ---
+source: /app/routes/web.php:36
+request: - -
+label: -
+truncated: false
+"مرحبا بالعالم – héllo ✓ 日本語"

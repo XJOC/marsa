@@ -34,6 +34,7 @@ pub struct Health {
 
 mod autostart;
 mod doctor;
+mod dumps;
 mod errors;
 mod events;
 mod jobs;
@@ -47,6 +48,7 @@ mod xdebug;
 
 pub use autostart::*;
 pub use doctor::*;
+pub use dumps::*;
 pub use errors::*;
 pub use events::*;
 pub use jobs::*;

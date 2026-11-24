@@ -1,0 +1,25 @@
+---
+source: crates/core/src/dumps/tests.rs
+expression: "describe(\"array\", version)"
+---
+--- dump 1 ---
+source: /app/routes/web.php:27
+request: - -
+label: -
+truncated: false
+array:4 [
+  "a" => 1
+  "b" => array:3 [
+    0 => 1
+    1 => 2
+    2 => array:1 [
+      "deep" => true
+    ]
+  ]
+  3 => "three"
+  "list" => array:3 [
+    0 => 10
+    1 => 20
+    2 => 30
+  ]
+]
