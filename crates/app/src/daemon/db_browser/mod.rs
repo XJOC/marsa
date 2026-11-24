@@ -7,6 +7,7 @@
 //! | `POST /v1/db/tables` | `DbTables`: the tables and views of a source |
 //! | `POST /v1/db/table` | `DbTable`: the columns of a table |
 //! | `POST /v1/db/rows` | `DbPage`: 500 rows after `offset`, in the key's order |
+//! | `POST /v1/db/cell` | `DbValue`: one whole value, up to 64 KiB, by the row's key |
 //! | `POST /v1/db/close` | `204`: every browser connection closes |
 //!
 //! | Error | When |
@@ -16,6 +17,7 @@
 //! | 404 `site_not_found` | no site has that name |
 //! | 404 `db_not_found` | the server has no such database, or it is one of the server's own |
 //! | 404 `db_table_not_found` | the catalog does not list the table |
+//! | 404 `db_row_not_found` | no row has the key, or the table has no key |
 //! | 400 `db_source_invalid` | the sort column is not the table's, or a name cannot be quoted |
 //! | 404 `db_file_not_found` | the site has no SQLite file; none is made |
 //! | 403 `db_file_outside_site` | the file is not a regular file inside the site's folder |
@@ -46,8 +48,8 @@ use axum::{Json, Router};
 use marsa_core::codes;
 use marsa_core::databases::ServerKind;
 use marsa_core::types::{
-    DbDatabase, DbPage, DbRowsRequest, DbServer, DbServerInfo, DbSource, DbSources, DbTable,
-    DbTableRequest, DbTables, DbTablesRequest,
+    DbCellRequest, DbDatabase, DbPage, DbRowsRequest, DbServer, DbServerInfo, DbSource, DbSources,
+    DbTable, DbTableRequest, DbTables, DbTablesRequest, DbValue,
 };
 use tracing::info;
 
@@ -118,6 +120,7 @@ pub fn routes() -> Router<Arc<Daemon>> {
         .route("/v1/db/tables", post(tables))
         .route("/v1/db/table", post(table))
         .route("/v1/db/rows", post(rows))
+        .route("/v1/db/cell", post(cell))
         .route("/v1/db/close", post(close))
 }
 
@@ -225,7 +228,16 @@ async fn table(
             let file = sqlite::site_file(&daemon, site).await?;
             within(sqlite::table(file, table)).await?
         }
-        DbSource::Server { server, .. } => return Err(rows_not_yet(&daemon, *server)),
+        DbSource::Server { server, database } => {
+            within(async {
+                let database = listed_database(&daemon, *server, database).await?;
+                servers::with(&daemon, *server, Some(database), async |conn| {
+                    servers::table(conn, &table).await
+                })
+                .await
+            })
+            .await?
+        }
     };
     log(&source, "table", started, answer.columns.len());
     Ok(Json(answer))
@@ -243,26 +255,46 @@ async fn rows(
             let file = sqlite::site_file(&daemon, site).await?;
             within(sqlite::page(file, request)).await?
         }
-        DbSource::Server { server, .. } => return Err(rows_not_yet(&daemon, *server)),
+        DbSource::Server { server, database } => {
+            within(async {
+                let database = listed_database(&daemon, *server, database).await?;
+                servers::with(&daemon, *server, Some(database), async |conn| {
+                    servers::page(conn, &request).await
+                })
+                .await
+            })
+            .await?
+        }
     };
     log(&source, "rows", started, page.rows.len());
     Ok(Json(page))
 }
 
-/// A server's columns and rows come with the next change.
-fn rows_not_yet(daemon: &Daemon, server: DbServer) -> HttpError {
-    if daemon.server(server.kind()).ready_port(daemon).is_none() {
-        return HttpError::new(
-            StatusCode::CONFLICT,
-            codes::DB_SERVER_NOT_RUNNING,
-            "the server is not running",
-        );
-    }
-    HttpError::new(
-        StatusCode::BAD_GATEWAY,
-        codes::DB_UNAVAILABLE,
-        "this daemon does not read a server's rows yet",
-    )
+async fn cell(
+    State(daemon): State<Arc<Daemon>>,
+    body: Result<Json<DbCellRequest>, JsonRejection>,
+) -> Result<Json<DbValue>, HttpError> {
+    let Json(request) = body.map_err(|err| err.reject(codes::INVALID_BODY))?;
+    let source = request.source.clone();
+    let started = Instant::now();
+    let value = match &source {
+        DbSource::SiteFile { site } => {
+            let file = sqlite::site_file(&daemon, site).await?;
+            within(sqlite::cell(file, request)).await?
+        }
+        DbSource::Server { server, database } => {
+            within(async {
+                let database = listed_database(&daemon, *server, database).await?;
+                servers::with(&daemon, *server, Some(database), async |conn| {
+                    servers::cell(conn, &request).await
+                })
+                .await
+            })
+            .await?
+        }
+    };
+    log(&source, "cell", started, 1);
+    Ok(Json(value))
 }
 
 /// `database`, if the server's catalog lists it. A system database is never

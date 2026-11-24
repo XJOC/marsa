@@ -23,8 +23,8 @@ use marsa_core::codes;
 use marsa_core::db_browser::{self, Engine};
 use marsa_core::sites::validate_name;
 use marsa_core::types::{
-    DbColumn, DbPage, DbRowsRequest, DbSiteFile, DbTable, DbTableInfo, DbTableRef, DbTables,
-    DbTotal, SiteList,
+    DbCellRequest, DbColumn, DbPage, DbRowsRequest, DbSiteFile, DbTable, DbTableInfo, DbTableRef,
+    DbTables, DbTotal, DbValue, SiteList,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection, Row};
@@ -252,4 +252,29 @@ async fn count(
             exact: true,
         })),
     }
+}
+
+/// `POST /v1/db/cell` for a site's file: the whole value, up to
+/// `VALUE_BYTES`, by the row's primary key, whose values are bound.
+pub(super) async fn cell(file: PathBuf, request: DbCellRequest) -> Result<DbValue, HttpError> {
+    with_file(&file, async |connection| {
+        let (_, columns, key) = read_columns(connection, &request.table).await?;
+        rows::check_cell(Engine::Sqlite, &columns, &key, &request)?;
+        let sql =
+            db_browser::cell_sql(Engine::Sqlite, &request.table, &request.column, &key, false)
+                .map_err(rows::sql_error)?;
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for value in &request.key {
+            query = query.bind(value.clone());
+        }
+        let row = query
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|err| unavailable(err.to_string()))?
+            .ok_or_else(rows::row_not_found)?;
+        Ok(DbValue {
+            cell: rows::sqlite_cell(&row, 0, db_browser::VALUE_BYTES)?,
+        })
+    })
+    .await
 }

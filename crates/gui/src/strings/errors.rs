@@ -528,6 +528,7 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
         "db_one_statement" => "Run one statement at a time.",
         "db_sql_too_long" => "The statement is longer than 256 KB.",
         "db_query_failed" => "The database did not run the statement.",
+        "db_row_not_found" => "No row has that key now. Refresh the rows.",
         "db_query_cancelled" => "Cancelled.",
         "db_busy" => "Another statement still runs on this database.",
         "db_result_gone" => "The result is no longer kept. Run the statement again.",

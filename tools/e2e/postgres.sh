@@ -195,6 +195,20 @@ jq -e '[.tables[] | select(.table.schema == "public" and .kind == "table") | .ta
 jq -e 'all(.tables[]; .table.schema | startswith("pg_") | not)' <<<"$tables" >/dev/null || fail "a system schema is listed"
 [ "$(api_status POST /v1/db/tables '{"source": {"kind": "server", "server": "postgres", "database": "postgres"}}')" = "404 db_not_found" ] ||
   fail "a system database was opened"
+# Columns, a page, and one whole value, read as text through the API.
+source='{"kind": "server", "server": "postgres", "database": "app"}'
+posts='{"schema": "public", "name": "posts"}'
+table=$(api_ok POST /v1/db/table "{\"source\": $source, \"table\": $posts}")
+[ "$(jq -c '[.columns[] | [.name, .key]]' <<<"$table")" = '[["id","primary"],["body",null]]' ] || fail "columns: $table"
+page=$(api_ok POST /v1/db/rows "{\"source\": $source, \"table\": $posts, \"offset\": 0, \"count\": true}")
+echo "first row: $(jq -c '.rows[0]' <<<"$page")"
+[ "$(jq -r '.rows[0][0]' <<<"$page")" = 1 ] || fail "rows: $page"
+[ "$(jq -r '.total.exact' <<<"$page")" = true ] || fail "total: $page"
+body=$(tcp -U root -d app -c 'select body from posts where id = 1')
+value=$(api_ok POST /v1/db/cell "{\"source\": $source, \"table\": $posts, \"column\": \"body\", \"key\": [\"1\"]}")
+[ "$(jq -r '.cell' <<<"$value")" = "$body" ] || fail "cell: $value"
+missing=$(api_status POST /v1/db/cell "{\"source\": $source, \"table\": $posts, \"column\": \"body\", \"key\": [\"9\"]}")
+[ "$missing" = "404 db_row_not_found" ] || fail "a missing row: $missing"
 # One connection for each source (the server's catalog, and app), no pool.
 # Each is read-only: the daemon reads the setting back before it uses one.
 others="select count(*) from pg_stat_activity where application_name = 'marsa'"

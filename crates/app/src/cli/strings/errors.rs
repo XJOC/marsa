@@ -415,6 +415,7 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "db_one_statement" => "Run one statement at a time.".into(),
         "db_sql_too_long" => "The statement is longer than 256 KB.".into(),
         "db_query_failed" => "The database did not run the statement.".into(),
+        "db_row_not_found" => "No row has that key now. Refresh the rows and try again.".into(),
         "db_query_cancelled" => "The statement was cancelled.".into(),
         "db_busy" => "Another statement still runs on this database. Wait for it to end, or \
              cancel it."

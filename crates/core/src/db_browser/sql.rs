@@ -95,20 +95,29 @@ pub fn count_sql(engine: Engine, table: &DbTableRef) -> Result<String, SqlError>
 /// key as text, because the window has its text only and a bound text does
 /// not compare with a number there; MySQL and SQLite turn the bound text
 /// into the column's type themselves.
+///
+/// A bound statement answers in each server's binary form, so MySQL and
+/// PostgreSQL give the value cast to text, or, for a `binary` column, only
+/// its length in bytes. SQLite gives the value itself.
 pub fn cell_sql(
     engine: Engine,
     table: &DbTableRef,
     column: &str,
     key: &[String],
+    binary: bool,
 ) -> Result<String, SqlError> {
     if key.is_empty() {
         return Err(SqlError::NoKey);
     }
-    let mut sql = format!(
-        "SELECT {} FROM {} WHERE ",
-        quote_ident(engine, column)?,
-        table_name(engine, table)?
-    );
+    let column = quote_ident(engine, column)?;
+    let value = match (engine, binary) {
+        (Engine::Mysql, true) => format!("OCTET_LENGTH({column})"),
+        (Engine::Mysql, false) => format!("CAST({column} AS CHAR)"),
+        (Engine::Postgres, true) => format!("octet_length({column})::bigint"),
+        (Engine::Postgres, false) => format!("{column}::text"),
+        (Engine::Sqlite, _) => column,
+    };
+    let mut sql = format!("SELECT {value} FROM {} WHERE ", table_name(engine, table)?);
     for (index, name) in key.iter().enumerate() {
         if index > 0 {
             sql.push_str(" AND ");

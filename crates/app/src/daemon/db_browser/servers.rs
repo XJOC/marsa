@@ -24,12 +24,16 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use marsa_core::codes;
 use marsa_core::db_browser::{self, Engine};
-use marsa_core::types::{DbServer, DbTables};
+use marsa_core::types::{
+    DbCell, DbCellRequest, DbColumn, DbPage, DbRowsRequest, DbServer, DbTable, DbTableInfo,
+    DbTableRef, DbTables, DbTotal, DbValue,
+};
 use sqlx::mysql::{MySqlConnectOptions, MySqlConnection, MySqlDatabaseError, MySqlSslMode};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgSslMode};
 use sqlx::{ConnectOptions, Connection, Row};
+use tokio_stream::StreamExt;
 
-use super::{REQUEST_LIMIT, catalog, unavailable};
+use super::{COUNT_LIMIT, REQUEST_LIMIT, catalog, rows, unavailable};
 use crate::daemon::http::routes::HttpError;
 use crate::daemon::state::Daemon;
 
@@ -50,9 +54,11 @@ const POSTGRES_HOME: &str = "postgres";
 /// at a time on each connection. The caller bounds the whole request with
 /// `within`.
 ///
-/// The connection is out of its slot while `work` runs, and goes back only
-/// when `work` succeeds: one that failed, timed out, or whose request was
-/// dropped (the client hung up) is closed, never used again.
+/// The connection is out of its slot while `work` runs. It goes back when
+/// `work` succeeds, or refuses the request itself (a 4xx answer, such as a
+/// row no one has): the connection is then in a known state. One that
+/// failed in the database or the driver (5xx), timed out, or whose request
+/// was dropped (the client hung up) is closed, never used again.
 pub(super) async fn with<T>(
     daemon: &Arc<Daemon>,
     server: DbServer,
@@ -76,7 +82,11 @@ pub(super) async fn with<T>(
         None => connect(server, port, database.as_deref()).await?,
     };
     let result = work(&mut conn).await;
-    if result.is_ok() {
+    let known = match &result {
+        Ok(_) => true,
+        Err(err) => err.status.is_client_error(),
+    };
+    if known {
         *held = Some(conn);
     }
     result
@@ -289,4 +299,209 @@ pub(super) fn db_error(err: sqlx::Error) -> HttpError {
     let mut http = HttpError::new(status, code, message);
     http.detail = Some(err.to_string());
     http
+}
+
+impl Conn {
+    fn engine(&self) -> Engine {
+        match self {
+            Self::Mysql(_) => Engine::Mysql,
+            Self::Postgres(_) => Engine::Postgres,
+        }
+    }
+}
+
+/// The columns of `table`, after the catalog listed it, and its key.
+async fn read_columns(
+    conn: &mut Conn,
+    table: &DbTableRef,
+) -> Result<(DbTableInfo, Vec<DbColumn>, Vec<String>), HttpError> {
+    let info = rows::listed(&tables(conn).await?, table)?;
+    let (columns, key) = match conn {
+        Conn::Mysql(conn) => {
+            let found = sqlx::query(db_browser::columns_sql(Engine::Mysql))
+                .bind(&table.name)
+                .fetch_all(conn)
+                .await
+                .map_err(db_error)?;
+            catalog::columns(&found)?
+        }
+        Conn::Postgres(conn) => {
+            let found = sqlx::query(db_browser::columns_sql(Engine::Postgres))
+                .bind(table.schema.clone())
+                .bind(&table.name)
+                .fetch_all(conn)
+                .await
+                .map_err(db_error)?;
+            catalog::columns(&found)?
+        }
+    };
+    Ok((info, columns, key))
+}
+
+/// `POST /v1/db/table` on a server.
+pub(super) async fn table(conn: &mut Conn, table: &DbTableRef) -> Result<DbTable, HttpError> {
+    let (_, columns, _) = read_columns(conn, table).await?;
+    Ok(DbTable { columns })
+}
+
+/// `POST /v1/db/rows` on a server. The page statement binds nothing, so it
+/// runs on each server's text protocol: every value comes as the text the
+/// server writes, whatever its type, and no type of the driver's is needed.
+pub(super) async fn page(conn: &mut Conn, request: &DbRowsRequest) -> Result<DbPage, HttpError> {
+    let engine = conn.engine();
+    let (info, columns, key) = read_columns(conn, &request.table).await?;
+    rows::check_sort(&columns, request.sort.as_ref())?;
+    let sql = db_browser::page_sql(
+        engine,
+        &request.table,
+        &key,
+        request.sort.as_ref(),
+        request.offset,
+    )
+    .map_err(rows::sql_error)?;
+    let (page_columns, key) = rows::page_columns(engine, &columns, &key);
+    let found = match conn {
+        Conn::Mysql(conn) => {
+            let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch(&mut *conn);
+            let mut found = Vec::new();
+            while let Some(row) = stream.next().await {
+                let row = row.map_err(db_error)?;
+                let cells = (0..row.len())
+                    .map(|index| rows::mysql_cell(&row, index, db_browser::CELL_BYTES))
+                    .collect::<Result<Vec<_>, _>>()?;
+                found.push(cells);
+            }
+            found
+        }
+        Conn::Postgres(conn) => {
+            let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch(&mut *conn);
+            let mut found = Vec::new();
+            while let Some(row) = stream.next().await {
+                let row = row.map_err(db_error)?;
+                let cells = (0..row.len())
+                    .map(|index| rows::pg_cell(&row, index, db_browser::CELL_BYTES))
+                    .collect::<Result<Vec<_>, _>>()?;
+                found.push(cells);
+            }
+            found
+        }
+    };
+    let seen = request.offset.saturating_add(found.len() as u64);
+    let total = match request.count {
+        true => count(conn, &request.table)
+            .await?
+            .unwrap_or_else(|| rows::estimated(info.estimate, seen)),
+        false => rows::estimated(info.estimate, seen),
+    };
+    Ok(DbPage {
+        columns: page_columns,
+        key,
+        rows: found,
+        offset: request.offset,
+        total,
+    })
+}
+
+/// The exact number of rows, or `None` when the server stopped the count
+/// at [`COUNT_LIMIT`]: the session's limit is lowered for that statement,
+/// then set back.
+async fn count(conn: &mut Conn, table: &DbTableRef) -> Result<Option<DbTotal>, HttpError> {
+    let sql = db_browser::count_sql(conn.engine(), table).map_err(rows::sql_error)?;
+    let (short, back) = (COUNT_LIMIT.as_millis(), LIMIT_MS);
+    let set = |ms: u128| match conn.engine() {
+        Engine::Mysql => format!("SET SESSION max_execution_time = {ms}"),
+        _ => format!("SET statement_timeout = {ms}"),
+    };
+    let (lower, restore) = (set(short), set(back));
+    run(conn, lower).await?;
+    let counted = match conn {
+        Conn::Mysql(conn) => {
+            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
+                .fetch_one(conn)
+                .await
+        }
+        Conn::Postgres(conn) => {
+            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
+                .fetch_one(conn)
+                .await
+        }
+    };
+    run(conn, restore).await?;
+    match counted.map_err(db_error) {
+        Ok(rows) => Ok(Some(DbTotal {
+            rows: u64::try_from(rows).unwrap_or(0),
+            exact: true,
+        })),
+        Err(err) if err.code == codes::DB_TIMEOUT => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// One statement with no rows, such as `SET`.
+async fn run(conn: &mut Conn, sql: String) -> Result<(), HttpError> {
+    let sql = sqlx::raw_sql(sqlx::AssertSqlSafe(sql));
+    match conn {
+        Conn::Mysql(conn) => sql.execute(conn).await.map(drop),
+        Conn::Postgres(conn) => sql.execute(conn).await.map(drop),
+    }
+    .map_err(db_error)
+}
+
+/// `POST /v1/db/cell` on a server: the whole value, up to `VALUE_BYTES`, by
+/// the row's primary key. The key's values are bound, never written into
+/// the SQL.
+pub(super) async fn cell(conn: &mut Conn, request: &DbCellRequest) -> Result<DbValue, HttpError> {
+    let engine = conn.engine();
+    let (_, columns, key) = read_columns(conn, &request.table).await?;
+    let binary = rows::check_cell(engine, &columns, &key, request)?;
+    let sql = db_browser::cell_sql(engine, &request.table, &request.column, &key, binary)
+        .map_err(rows::sql_error)?;
+    let cell = match conn {
+        Conn::Mysql(conn) => {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for value in &request.key {
+                query = query.bind(value.clone());
+            }
+            let row = query
+                .fetch_optional(conn)
+                .await
+                .map_err(db_error)?
+                .ok_or_else(rows::row_not_found)?;
+            value_of(&row, binary)?
+        }
+        Conn::Postgres(conn) => {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for value in &request.key {
+                query = query.bind(value.clone());
+            }
+            let row = query
+                .fetch_optional(conn)
+                .await
+                .map_err(db_error)?
+                .ok_or_else(rows::row_not_found)?;
+            value_of(&row, binary)?
+        }
+    };
+    Ok(DbValue { cell })
+}
+
+/// The one column of a cell statement: a length for a binary column, else
+/// text, cut at `VALUE_BYTES`.
+fn value_of<R>(row: &R, binary: bool) -> Result<DbCell, HttpError>
+where
+    R: Row,
+    for<'r> String: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    for<'r> i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    usize: sqlx::ColumnIndex<R>,
+{
+    if binary {
+        let bytes: Option<i64> = row.try_get(0).map_err(db_error)?;
+        return Ok(bytes.map_or(DbCell::Null, |bytes| DbCell::Binary {
+            bytes: u64::try_from(bytes).unwrap_or(0),
+        }));
+    }
+    let text: Option<String> = row.try_get(0).map_err(db_error)?;
+    Ok(text.map_or(DbCell::Null, |text| {
+        db_browser::cut_cell(text.as_bytes(), db_browser::VALUE_BYTES)
+    }))
 }

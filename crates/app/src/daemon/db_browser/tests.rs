@@ -763,3 +763,73 @@ async fn large_values_come_back_cut() {
     let json: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["rows"][0][1]["bytes"], 1_048_576);
 }
+
+/// `POST /v1/db/cell` on the site `blog`'s `table`.
+async fn cell(app: &App, table: &str, column: &str, key: Value) -> (StatusCode, Value) {
+    let body =
+        json!({ "source": blog(), "table": { "name": table }, "column": column, "key": key });
+    app.router.answer("POST", "/v1/db/cell", Some(body)).await
+}
+
+#[tokio::test]
+async fn a_whole_value_is_read_by_the_rows_key() {
+    let app = App::new();
+    make_file(
+        &app.site("blog").await,
+        "CREATE TABLE docs (id INTEGER PRIMARY KEY, body TEXT, raw BLOB);\
+         INSERT INTO docs VALUES (1, hex(zeroblob(50000)), x'0102'), (2, NULL, NULL);\
+         INSERT INTO docs VALUES (3, hex(zeroblob(40000)), NULL);\
+         CREATE TABLE loose (body TEXT); INSERT INTO loose VALUES ('x');",
+    )
+    .await;
+    // 100,000 bytes: cut at 64 KiB, with the whole length.
+    let (status, json) = cell(&app, "docs", "body", json!(["1"])).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["cell"]["bytes"], 100_000);
+    assert_eq!(json["cell"]["text"].as_str().unwrap().len(), 65_536);
+    // A BLOB is its size, a null a null, a number its text.
+    let (_, json) = cell(&app, "docs", "raw", json!(["1"])).await;
+    assert_eq!(json["cell"], json!({ "bytes": 2 }));
+    let (_, json) = cell(&app, "docs", "body", json!(["2"])).await;
+    assert_eq!(json["cell"], Value::Null);
+    let (_, json) = cell(&app, "docs", "id", json!(["3"])).await;
+    assert_eq!(json["cell"], "3");
+
+    let refused = [
+        (
+            cell(&app, "docs", "body", json!(["9"])).await,
+            404,
+            "db_row_not_found",
+        ),
+        (
+            cell(&app, "loose", "body", json!(["1"])).await,
+            404,
+            "db_row_not_found",
+        ),
+        (
+            cell(&app, "docs", "nope", json!(["1"])).await,
+            400,
+            "db_source_invalid",
+        ),
+        (
+            cell(&app, "docs", "body", json!(["1", "2"])).await,
+            400,
+            "db_source_invalid",
+        ),
+        (
+            cell(&app, "nope", "body", json!(["1"])).await,
+            404,
+            "db_table_not_found",
+        ),
+    ];
+    for ((status, json), want_status, code) in refused {
+        assert_eq!(
+            (status.as_u16(), json["error"]["code"].as_str()),
+            (want_status, Some(code)),
+            "{json}"
+        );
+    }
+    // A value that is not a key is bound, never written into the SQL.
+    let (status, _) = cell(&app, "docs", "body", json!(["1 OR 1=1"])).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

@@ -206,6 +206,16 @@ tables=$(api_ok POST /v1/db/tables '{"source": {"kind": "server", "server": "mys
 [ "$(jq -c '[.tables[] | [.table.name, .kind]]' <<<"$tables")" = '[["migrations","table"],["posts","table"]]' ] || fail "tables: $tables"
 [ "$(api_status POST /v1/db/tables '{"source": {"kind": "server", "server": "mysql", "database": "mysql"}}')" = "404 db_not_found" ] ||
   fail "a system database was opened"
+# Columns, a page, and one whole value, read as text through the API.
+table=$(api_ok POST /v1/db/table '{"source": {"kind": "server", "server": "mysql", "database": "app"}, "table": {"name": "posts"}}')
+[ "$(jq -c '[.columns[] | [.name, .key]]' <<<"$table")" = '[["id","primary"],["body",null]]' ] || fail "columns: $table"
+page=$(api_ok POST /v1/db/rows '{"source": {"kind": "server", "server": "mysql", "database": "app"}, "table": {"name": "posts"}, "offset": 0, "count": true}')
+[ "$(jq -c '.rows' <<<"$page")" = '[["1","مرحبا بالعالم"],["2","hello world"]]' ] || fail "rows: $page"
+[ "$(jq -c '.total' <<<"$page")" = '{"rows":2,"exact":true}' ] || fail "total: $page"
+value=$(api_ok POST /v1/db/cell '{"source": {"kind": "server", "server": "mysql", "database": "app"}, "table": {"name": "posts"}, "column": "body", "key": ["1"]}')
+[ "$(jq -r '.cell' <<<"$value")" = "مرحبا بالعالم" ] || fail "cell: $value"
+missing=$(api_status POST /v1/db/cell '{"source": {"kind": "server", "server": "mysql", "database": "app"}, "table": {"name": "posts"}, "column": "body", "key": ["9"]}')
+[ "$missing" = "404 db_row_not_found" ] || fail "a missing row: $missing"
 # One connection for each source (the server's catalog, and app), no pool,
 # both over TCP: the socket's root would show `localhost` as its host.
 others="select count(*) from information_schema.processlist where user = 'root' and host like '127.0.0.1:%' and id <> connection_id()"
