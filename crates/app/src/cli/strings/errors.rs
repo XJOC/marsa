@@ -114,6 +114,8 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
         }
         "download_too_large" => format!("A download is larger than allowed{}. {REPORT}", url(": ")),
         "download_io" => format!("Cannot save a download to {path}. {DISK}"),
+        "dump_invalid" => "A dump that PHP sent could not be read, so it was dropped.".into(),
+        "dump_too_large" => "A dump was too large to keep, so only a note was saved.".into(),
         "checksum_mismatch" => {
             "A downloaded file does not match its signed checksum. Nothing was installed.".into()
         }

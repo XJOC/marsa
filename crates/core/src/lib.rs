@@ -12,6 +12,7 @@ pub mod data_dir;
 pub mod databases;
 pub mod dns;
 pub mod doctor;
+pub mod dumps;
 pub mod fs;
 pub mod helper;
 pub mod hex;

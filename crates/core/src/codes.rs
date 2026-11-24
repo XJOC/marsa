@@ -52,6 +52,10 @@ pub const DOWNLOAD_INSECURE_URL: &str = "download_insecure_url";
 pub const DOWNLOAD_IO: &str = "download_io";
 pub const DOWNLOAD_SIZE_MISMATCH: &str = "download_size_mismatch";
 pub const DOWNLOAD_TOO_LARGE: &str = "download_too_large";
+/// A line that is not a dump of Symfony's var-dumper (bad base64, bad `serialize` text, or too deep).
+pub const DUMP_INVALID: &str = "dump_invalid";
+/// A line over `dumps::MAX_LINE_BYTES`: the daemon keeps a note, not the line.
+pub const DUMP_TOO_LARGE: &str = "dump_too_large";
 pub const EXITED: &str = "exited";
 pub const EXTRACT_CORRUPT: &str = "extract_corrupt";
 pub const EXTRACT_DUPLICATE: &str = "extract_duplicate";
@@ -317,6 +321,8 @@ pub const ALL: &[&str] = &[
     DOWNLOAD_IO,
     DOWNLOAD_SIZE_MISMATCH,
     DOWNLOAD_TOO_LARGE,
+    DUMP_INVALID,
+    DUMP_TOO_LARGE,
     EXITED,
     EXTRACT_CORRUPT,
     EXTRACT_DUPLICATE,
