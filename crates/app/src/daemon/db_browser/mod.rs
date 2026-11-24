@@ -339,7 +339,7 @@ async fn start_query(
             let id = id
                 .await
                 .map_err(|_| unavailable("the job has no id".to_owned()))?;
-            let (result, done) = query::run(&daemon, target, statement).await?;
+            let (result, done) = query::run(&daemon, id, target, statement).await?;
             log(&source, "query", started, result.rows.len());
             daemon.db_browser().queries.keep(id, result);
             Ok(done)
@@ -355,6 +355,13 @@ async fn start_query(
     );
     let _ = id_sent.send(id);
     Ok((StatusCode::ACCEPTED, Json(JobAccepted { id })))
+}
+
+/// Cancels the user's statement `id`, if it runs: `DELETE /v1/jobs/{id}`.
+pub(crate) fn cancel_query(daemon: &Daemon, id: u64) {
+    if let Some(browser) = daemon.open_db_browser() {
+        browser.queries.cancel(id);
+    }
 }
 
 /// The rows of a finished statement, once.
@@ -400,6 +407,7 @@ async fn listed_database(
 async fn close(State(daemon): State<Arc<Daemon>>) -> StatusCode {
     if let Some(browser) = daemon.open_db_browser() {
         browser.close_all();
+        browser.queries.cancel_all();
         browser.queries.drop_results();
     }
     info!(request = "close", "database browser");

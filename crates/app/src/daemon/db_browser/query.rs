@@ -10,8 +10,16 @@
 //!
 //! The statement's text runs as the user wrote it: that is the feature. It
 //! is never logged, and nor is anything the database answers.
+//!
+//! A cancel (`DELETE /v1/jobs/{id}`, or `POST /v1/db/close`) or the time
+//! limit stops the statement in the database, not only the wait: a second
+//! short connection runs `pg_cancel_backend` (PostgreSQL) or `KILL QUERY`
+//! (MySQL), which `root` may do to its own statements; SQLite's progress
+//! handler sees a flag and interrupts it. The statement's connection is
+//! then dropped, never reused.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -21,6 +29,7 @@ use marsa_core::db_browser::{self, Engine, column_kind};
 use marsa_core::types::{DbCell, DbPageColumn, DbQueryDone, DbResult, DbServer, DbSource};
 use sqlx::{Column, Connection, Row, TypeInfo};
 use tokio_stream::{Stream, StreamExt};
+use tokio_util::sync::CancellationToken;
 
 use super::servers::{self, Conn};
 use super::{rows, sqlite, unavailable};
@@ -44,6 +53,22 @@ struct Inner {
     busy: Vec<DbSource>,
     /// The rows of finished statements, by job id, and when they ended.
     results: HashMap<u64, (DbResult, Instant)>,
+    /// The statements that run, by job id: their cancel, and how to stop
+    /// them in the database once they are connected.
+    running: HashMap<u64, (CancellationToken, Option<Stop>)>,
+}
+
+/// How to stop a statement inside its database.
+#[derive(Clone)]
+pub(super) enum Stop {
+    /// The flag SQLite's progress handler reads.
+    Sqlite(Arc<AtomicBool>),
+    /// The server's id of the statement's connection.
+    Server {
+        server: DbServer,
+        database: String,
+        backend: u64,
+    },
 }
 
 impl Queries {
@@ -83,6 +108,36 @@ impl Queries {
 
     pub(super) fn drop_results(&self) {
         self.lock().results.clear();
+    }
+
+    fn start(&self, id: u64) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.lock().running.insert(id, (token.clone(), None));
+        token
+    }
+
+    fn set_stop(&self, id: u64, stop: Stop) {
+        if let Some((_, slot)) = self.lock().running.get_mut(&id) {
+            *slot = Some(stop);
+        }
+    }
+
+    fn finish(&self, id: u64) -> Option<Stop> {
+        self.lock().running.remove(&id).and_then(|(_, stop)| stop)
+    }
+
+    /// Cancels statement `id`, if it runs.
+    pub(super) fn cancel(&self, id: u64) {
+        if let Some((token, _)) = self.lock().running.get(&id) {
+            token.cancel();
+        }
+    }
+
+    /// Cancels every statement that runs.
+    pub(super) fn cancel_all(&self) {
+        for (token, _) in self.lock().running.values() {
+            token.cancel();
+        }
     }
 
     /// A panic while the lock was held leaves whole values: each change is
@@ -131,22 +186,39 @@ pub(super) fn one_statement(engine: Engine, sql: &str) -> Result<String, HttpErr
     }
 }
 
-/// Runs `statement` on `target` and reads its rows, within [`QUERY_LIMIT`].
+/// Runs `statement` on `target` as job `id` and reads its rows, within
+/// [`QUERY_LIMIT`], unless it is cancelled first.
 pub(super) async fn run(
     daemon: &Daemon,
+    id: u64,
     target: Target,
     statement: String,
 ) -> Result<(DbResult, DbQueryDone), HttpError> {
     let started = Instant::now();
-    let read = tokio::time::timeout(QUERY_LIMIT, read(daemon, target, statement))
-        .await
-        .unwrap_or_else(|_| {
-            Err(HttpError::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                codes::DB_TIMEOUT,
-                "the statement ran longer than 5 minutes",
-            ))
-        });
+    let queries = &daemon.db_browser().queries;
+    let cancel = queries.start(id);
+    let read = tokio::select! {
+        read = tokio::time::timeout(QUERY_LIMIT, read(daemon, id, target, statement)) => {
+            read.unwrap_or_else(|_| {
+                Err(HttpError::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    codes::DB_TIMEOUT,
+                    "the statement ran longer than 5 minutes",
+                ))
+            })
+        }
+        () = cancel.cancelled() => Err(HttpError::new(
+            StatusCode::CONFLICT,
+            codes::DB_QUERY_CANCELLED,
+            "the statement was cancelled",
+        )),
+    };
+    let stop = queries.finish(id);
+    if let (Err(err), Some(stop)) = (&read, stop)
+        && (err.code == codes::DB_QUERY_CANCELLED || err.code == codes::DB_TIMEOUT)
+    {
+        stop_in_database(daemon, stop).await;
+    }
     let (columns, rows, cut) = read?;
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let done = DbQueryDone {
@@ -164,13 +236,42 @@ pub(super) async fn run(
     Ok((result, done))
 }
 
+/// Stops a statement the wait gave up on, in its database.
+async fn stop_in_database(daemon: &Daemon, stop: Stop) {
+    match stop {
+        Stop::Sqlite(flag) => flag.store(true, Ordering::Relaxed),
+        Stop::Server {
+            server,
+            database,
+            backend,
+        } => servers::stop_statement(daemon, server, &database, backend).await,
+    }
+}
+
 type Read = (Vec<DbPageColumn>, Vec<Vec<DbCell>>, bool);
 
-async fn read(daemon: &Daemon, target: Target, statement: String) -> Result<Read, HttpError> {
+async fn read(
+    daemon: &Daemon,
+    id: u64,
+    target: Target,
+    statement: String,
+) -> Result<Read, HttpError> {
+    let queries = &daemon.db_browser().queries;
     let sql = sqlx::raw_sql(sqlx::AssertSqlSafe(statement));
     match target {
         Target::File(file) => {
             let mut conn = sqlite::open(&file).await?;
+            let flag = Arc::new(AtomicBool::new(false));
+            {
+                let flag = Arc::clone(&flag);
+                let mut handle = conn
+                    .lock_handle()
+                    .await
+                    .map_err(|err| unavailable(err.to_string()))?;
+                // Every 1,000 steps of SQLite's machine: false interrupts.
+                handle.set_progress_handler(1000, move || !flag.load(Ordering::Relaxed));
+            }
+            queries.set_stop(id, Stop::Sqlite(flag));
             let read = collect(Engine::Sqlite, sql.fetch(&mut conn), rows::sqlite_cell).await;
             let _ = conn.close().await;
             read
@@ -178,7 +279,18 @@ async fn read(daemon: &Daemon, target: Target, statement: String) -> Result<Read
         // The connection is dropped after the read, closed: never reused,
         // and a cut result stops the server's sending.
         Target::Server(server, database) => {
-            match servers::query_connection(daemon, server, &database, QUERY_LIMIT).await? {
+            let mut conn =
+                servers::query_connection(daemon, server, &database, QUERY_LIMIT).await?;
+            let backend = servers::backend_id(&mut conn).await?;
+            queries.set_stop(
+                id,
+                Stop::Server {
+                    server,
+                    database,
+                    backend,
+                },
+            );
+            match conn {
                 Conn::Mysql(mut conn) => {
                     collect(Engine::Mysql, sql.fetch(&mut conn), rows::mysql_cell).await
                 }
