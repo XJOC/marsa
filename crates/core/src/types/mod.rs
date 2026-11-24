@@ -33,6 +33,7 @@ pub struct Health {
 }
 
 mod autostart;
+mod db_browser;
 mod doctor;
 mod dumps;
 mod errors;
@@ -48,6 +49,7 @@ mod uninstall;
 mod xdebug;
 
 pub use autostart::*;
+pub use db_browser::*;
 pub use doctor::*;
 pub use dumps::*;
 pub use errors::*;
