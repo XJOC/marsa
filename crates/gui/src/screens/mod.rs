@@ -3,6 +3,7 @@
 //! moved here without a change in behavior; each screen's own
 //! task redesigns it.
 
+pub(crate) mod dumps;
 pub(crate) mod first_run;
 pub(crate) mod home;
 pub(crate) mod lines;

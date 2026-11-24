@@ -118,6 +118,7 @@ impl App {
             }
             Effect::PickFolder(pick) => self.open_picker(ctx, pick),
             Effect::OpenUrl(url) => open_url(ctx, &url),
+            Effect::CopyText(text) => ctx.copy_text(text),
         }
     }
 
@@ -334,6 +335,7 @@ mod tests {
         let plan = Plan {
             sites: 12,
             logs: 0,
+            dumps: 0,
             idle: std::time::Duration::from_secs(1),
             scroll: 0,
         };

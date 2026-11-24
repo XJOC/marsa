@@ -70,6 +70,8 @@ pub enum Effect {
     PickFolder(Pick),
     /// Open this page of Mailpit's in the browser.
     OpenUrl(String),
+    /// Put this text on the clipboard.
+    CopyText(String),
 }
 
 impl Effect {
@@ -220,6 +222,7 @@ pub enum Route {
     Services,
     Logs(LogSource),
     Mail,
+    Dumps,
     Settings,
 }
 
@@ -332,6 +335,8 @@ pub enum Action {
     ClearDumps,
     /// The switch "Capture" on Dumps.
     ToggleDumps,
+    /// "Copy" on Dumps: the shown dump's text goes to the clipboard.
+    CopyDump,
 }
 
 /// The window's state: the daemon's session, and what belongs to the window
@@ -517,6 +522,11 @@ impl Model {
             Action::PickFolder(pick) => Effect::PickFolder(pick),
             Action::OpenMailpit => Effect::OpenUrl(mailpit_url()),
             Action::OpenMailPage => self.mail_page().map_or(Effect::None, Effect::OpenUrl),
+            Action::CopyDump => self
+                .session
+                .dumps
+                .shown()
+                .map_or(Effect::None, |dump| Effect::CopyText(dump.text.clone())),
             action => self.change(action).or_else(|| self.next_command()).into(),
         }
     }
@@ -555,8 +565,18 @@ impl Model {
                 }
                 // No event carries mail: the screen reads it as it opens.
                 let read = route == Route::Mail;
+                // Opening the screen counts every dump as seen, and asks
+                // for what came since; leaving it counts the new ones again.
+                let dumps = route == Route::Dumps;
+                self.session.dumps.set_open(dumps);
                 self.route = route;
-                if read { self.read_mail() } else { None }
+                if read {
+                    self.read_mail()
+                } else if dumps && self.is_connected() {
+                    Some(Command::ReadDumps)
+                } else {
+                    None
+                }
             }
             Action::FoldSidebar => {
                 self.sidebar_folded = !self.sidebar_folded;
@@ -698,7 +718,8 @@ impl Model {
             | Action::OpenDataFolder
             | Action::PickFolder(_)
             | Action::OpenMailpit
-            | Action::OpenMailPage => None,
+            | Action::OpenMailPage
+            | Action::CopyDump => None,
         }
     }
 }
