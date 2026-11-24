@@ -1,0 +1,7 @@
+---
+source: crates/core/src/db_browser/tests.rs
+expression: "catalog(Engine::Mysql, Some(DbServer::Mysql))"
+---
+SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys') ORDER BY schema_name
+SELECT NULL, table_name, CASE WHEN table_type = 'BASE TABLE' THEN 'table' ELSE 'view' END, table_rows FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY table_name
+SELECT c.column_name, c.column_type, CASE WHEN c.is_nullable = 'YES' THEN 1 ELSE 0 END, c.column_default, CASE c.column_key WHEN 'PRI' THEN 'primary' WHEN 'UNI' THEN 'unique' END, COALESCE(k.ordinal_position, 0) FROM information_schema.columns c LEFT JOIN information_schema.key_column_usage k ON k.table_schema = c.table_schema AND k.table_name = c.table_name AND k.column_name = c.column_name AND k.constraint_name = 'PRIMARY' WHERE c.table_schema = DATABASE() AND c.table_name = ? ORDER BY c.ordinal_position

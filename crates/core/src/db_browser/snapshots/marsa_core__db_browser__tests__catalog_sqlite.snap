@@ -1,0 +1,6 @@
+---
+source: crates/core/src/db_browser/tests.rs
+expression: "catalog(Engine::Sqlite, None)"
+---
+SELECT NULL, name, type, NULL FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY name
+SELECT p.name, p.type, CASE WHEN p."notnull" = 0 AND p.pk = 0 THEN 1 ELSE 0 END, p.dflt_value, CASE WHEN p.pk > 0 THEN 'primary' WHEN EXISTS (SELECT 1 FROM pragma_index_list(?1) AS l WHERE l."unique" = 1 AND l.origin <> 'pk' AND (SELECT COUNT(*) FROM pragma_index_info(l.name)) = 1 AND (SELECT i.name FROM pragma_index_info(l.name) AS i) = p.name) THEN 'unique' END, p.pk FROM pragma_table_info(?1) AS p ORDER BY p.cid

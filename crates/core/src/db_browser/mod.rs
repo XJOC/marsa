@@ -1,15 +1,18 @@
 //! The database browser's pure part (ADR 0028): the limits, the SQL text
-//! `marsad` sends for the browser's own reads, and the cut of a cell.
+//! `marsad` sends for the browser's own reads (the catalog, and a table's
+//! pages and values), and the cut of a cell.
 //!
 //! Nothing here opens a connection or reads a file: it takes data and returns
 //! data. No value from the user is ever written into SQL text. Names are
 //! quoted with [`quote_ident`] after the daemon found them in the server's
 //! catalog, numbers come from `u64`, and every other value is bound.
 
+mod catalog;
 mod sql;
 
 use std::path::{Path, PathBuf};
 
+pub use catalog::*;
 pub use sql::*;
 
 use crate::codes;
