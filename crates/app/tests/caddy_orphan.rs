@@ -237,6 +237,7 @@ fn daemon_on(data: &Path, mode: &str, ports: Ports, processes: Arc<dyn ProcessPr
         admin_port: ports.admin,
         http_port: ports.http,
         https_port: ports.https,
+        dumps: None,
     };
     caddy.ready_limit = WAIT;
     caddy.processes = processes;

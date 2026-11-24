@@ -11,6 +11,7 @@
 //! sent at most every 250 ms however many dumps arrive.
 
 pub mod api;
+pub mod caddy;
 mod listener;
 mod store;
 

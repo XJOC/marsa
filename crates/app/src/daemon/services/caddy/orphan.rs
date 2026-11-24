@@ -792,6 +792,7 @@ mod tests {
             http_port: held.local_addr().unwrap().port(),
             admin_port: free_port(),
             https_port: free_port(),
+            dumps: None,
         };
         let setup = Setup {
             admin: Admin::new(input.admin_port),
@@ -959,6 +960,7 @@ mod tests {
             http_port: free_port(),
             https_port: free_port(),
             admin_port: setup.input.admin_port,
+            dumps: None,
         };
         let fake = Fake::new([]);
         let orphans = |other| Orphans {
