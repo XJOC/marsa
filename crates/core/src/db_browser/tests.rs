@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use super::split::{KEYWORDS, Lexer};
 use super::*;
 use crate::types::{DbServer, DbSort, DbTableRef};
 
@@ -115,7 +116,7 @@ fn only_a_postgres_table_has_a_schema() {
 }
 
 /// Each statement of a table's reads, one per line, for a snapshot.
-fn statements(engine: Engine) -> String {
+fn table_statements(engine: Engine) -> String {
     let users = table("users");
     let id = names(&["id"]);
     let by_email = DbSort {
@@ -150,9 +151,9 @@ fn statements(engine: Engine) -> String {
 
 #[test]
 fn the_table_statements_of_each_engine() {
-    insta::assert_snapshot!("statements_mysql", statements(Engine::Mysql));
-    insta::assert_snapshot!("statements_postgres", statements(Engine::Postgres));
-    insta::assert_snapshot!("statements_sqlite", statements(Engine::Sqlite));
+    insta::assert_snapshot!("statements_mysql", table_statements(Engine::Mysql));
+    insta::assert_snapshot!("statements_postgres", table_statements(Engine::Postgres));
+    insta::assert_snapshot!("statements_sqlite", table_statements(Engine::Sqlite));
 }
 
 #[test]
@@ -273,4 +274,240 @@ fn each_source_speaks_its_engine() {
         site: "blog".into(),
     };
     assert_eq!(site.engine(), Engine::Sqlite);
+}
+
+/// The text of each statement `statements` finds.
+fn split(engine: Engine, text: &str) -> Vec<String> {
+    statements(engine, text)
+        .into_iter()
+        .map(|range| text[range].to_owned())
+        .collect()
+}
+
+#[test]
+fn a_semicolon_in_a_string_or_comment_does_not_end_the_statement() {
+    for engine in ENGINES {
+        assert_eq!(
+            split(engine, "SELECT 1; SELECT ';' -- x;"),
+            ["SELECT 1", "SELECT ';' -- x;"],
+            "{engine:?}"
+        );
+        assert_eq!(
+            split(engine, "SELECT 'it''s; ok' ; SELECT 2;"),
+            ["SELECT 'it''s; ok'", "SELECT 2"],
+            "{engine:?}"
+        );
+        assert_eq!(
+            split(engine, "SELECT \"a;b\" FROM t /* ; */;\nSELECT 2"),
+            ["SELECT \"a;b\" FROM t /* ; */", "SELECT 2"],
+            "{engine:?}"
+        );
+    }
+    assert_eq!(
+        split(Engine::Mysql, "SELECT `a;b` FROM t"),
+        ["SELECT `a;b` FROM t"]
+    );
+    assert_eq!(
+        split(Engine::Sqlite, "SELECT `a;b` FROM t"),
+        ["SELECT `a;b` FROM t"]
+    );
+}
+
+#[test]
+fn each_engine_has_its_own_escapes_and_comments() {
+    // MySQL: `\'` stays in the text. PostgreSQL and SQLite: `\` is a letter.
+    let backslash = r"SELECT 'a\';b'";
+    assert_eq!(split(Engine::Mysql, backslash).len(), 1);
+    assert_eq!(split(Engine::Postgres, backslash).len(), 2);
+    assert_eq!(split(Engine::Sqlite, backslash).len(), 2);
+    // PostgreSQL's E'...' escapes like MySQL.
+    assert_eq!(split(Engine::Postgres, r"SELECT E'a\';b'").len(), 1);
+    // `#` is a comment in MySQL only (PostgreSQL's XOR).
+    assert_eq!(split(Engine::Mysql, "SELECT 1 # a; b\nFROM t").len(), 1);
+    assert_eq!(split(Engine::Postgres, "SELECT 1 # 2; SELECT 3").len(), 2);
+    // MySQL needs a space after `--`; the others do not.
+    assert_eq!(split(Engine::Mysql, "SELECT 1 --x; SELECT 2").len(), 2);
+    assert_eq!(split(Engine::Postgres, "SELECT 1 --x; SELECT 2").len(), 1);
+    // Only PostgreSQL nests block comments.
+    let nested = "/* a /* b */ ; */ SELECT 1";
+    assert_eq!(split(Engine::Postgres, nested), [nested]);
+    assert_eq!(split(Engine::Mysql, nested), ["*/ SELECT 1"]);
+}
+
+#[test]
+fn a_dollar_quote_hides_its_semicolons_in_postgres_only() {
+    let body = "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql; SELECT 2";
+    assert_eq!(split(Engine::Postgres, body).len(), 2);
+    let tagged = "DO $body$ BEGIN PERFORM 1; END $body$; SELECT 2";
+    assert_eq!(
+        split(Engine::Postgres, tagged),
+        ["DO $body$ BEGIN PERFORM 1; END $body$", "SELECT 2"]
+    );
+    // `$1` is a parameter and `a$b$` a name, not a quote.
+    assert_eq!(split(Engine::Postgres, "SELECT $1; SELECT 2").len(), 2);
+    assert_eq!(split(Engine::Postgres, "SELECT a$b$; SELECT 2").len(), 2);
+    assert_eq!(split(Engine::Mysql, "SELECT '$$'; SELECT $$").len(), 2);
+}
+
+#[test]
+fn comments_and_space_alone_are_no_statement() {
+    for engine in ENGINES {
+        assert!(split(engine, "").is_empty());
+        assert!(split(engine, "  ;  ;\n").is_empty());
+        assert!(split(engine, "-- just a note").is_empty());
+        assert!(split(engine, "/* a */ ; /* b */").is_empty());
+        assert_eq!(split(engine, "SELECT 1; -- done"), ["SELECT 1"]);
+    }
+}
+
+#[test]
+fn what_the_lexer_does_not_close_stays_one_statement() {
+    for engine in ENGINES {
+        assert_eq!(
+            split(engine, "SELECT 'abc; SELECT 2"),
+            ["SELECT 'abc; SELECT 2"]
+        );
+        assert_eq!(
+            split(engine, "SELECT 1 /* ; SELECT 2"),
+            ["SELECT 1 /* ; SELECT 2"]
+        );
+    }
+    assert_eq!(split(Engine::Postgres, "SELECT $$; SELECT 2").len(), 1);
+}
+
+#[test]
+fn the_statement_at_the_cursor() {
+    let text = "SELECT 1;\n\nSELECT 'é;';  \n";
+    let at = |cursor| statement_at(Engine::Mysql, text, cursor).map(|range| &text[range]);
+    assert_eq!(at(0), Some("SELECT 1"));
+    assert_eq!(at(4), Some("SELECT 1"));
+    // Right after the `;`: still the statement before it.
+    assert_eq!(at(9), Some("SELECT 1"));
+    assert_eq!(at(10), Some("SELECT 'é;'"));
+    assert_eq!(at(15), Some("SELECT 'é;'"));
+    // In the space after the last statement, and past the end.
+    assert_eq!(at(text.len()), Some("SELECT 'é;'"));
+    assert_eq!(at(text.len() + 10), Some("SELECT 'é;'"));
+    // Before any code: the statement after.
+    let leading = "-- note\n;SELECT 2";
+    assert_eq!(
+        statement_at(Engine::Mysql, leading, 2).map(|range| &leading[range]),
+        Some("SELECT 2")
+    );
+    assert_eq!(statement_at(Engine::Mysql, "", 0), None);
+    assert_eq!(statement_at(Engine::Mysql, " -- x", 3), None);
+}
+
+fn kinds(engine: Engine, line: &str, state: &LineState) -> (Vec<(TokenKind, String)>, LineState) {
+    let (tokens, end) = tokens(engine, line, state);
+    let words = tokens
+        .into_iter()
+        .map(|token| (token.kind, line[token.range].to_owned()))
+        .collect();
+    (words, end)
+}
+
+#[test]
+fn a_line_is_split_into_colored_tokens() {
+    use TokenKind::*;
+    let (words, end) = kinds(
+        Engine::Postgres,
+        "select \"Name\", 'x', 4.5e-3 from t -- all",
+        &LineState::Code,
+    );
+    let expected = [
+        (Keyword, "select"),
+        (Other, "\"Name\""),
+        (Other, ","),
+        (String, "'x'"),
+        (Other, ","),
+        (Number, "4.5e-3"),
+        (Keyword, "from"),
+        (Other, "t"),
+        (Comment, "-- all"),
+    ];
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|(k, w)| (*k, (*w).to_owned()))
+        .collect();
+    assert_eq!(words, expected);
+    assert_eq!(end, LineState::Code);
+    // A MySQL `"..."` is a text, not a name.
+    let (words, _) = kinds(Engine::Mysql, "\"x\"", &LineState::Code);
+    assert_eq!(words, [(String, "\"x\"".to_owned())]);
+}
+
+#[test]
+fn a_line_starts_where_the_line_before_ended() {
+    use TokenKind::*;
+    let (_, state) = kinds(Engine::Postgres, "SELECT 'it", &LineState::Code);
+    assert_eq!(
+        state,
+        LineState::Quoted {
+            quote: b'\'',
+            backslash: false
+        }
+    );
+    let (words, state) = kinds(Engine::Postgres, "s' FROM t", &state);
+    assert_eq!(words[0], (String, "s'".to_owned()));
+    assert_eq!(words[1], (Keyword, "FROM".to_owned()));
+    assert_eq!(state, LineState::Code);
+
+    let (_, state) = kinds(Engine::Postgres, "/* a /* b */", &LineState::Code);
+    assert_eq!(state, LineState::Comment { depth: 1 });
+    let (_, state) = kinds(Engine::Postgres, "AS $fn$ SELECT 1;", &LineState::Code);
+    assert_eq!(state, LineState::Dollar { tag: "fn".into() });
+    let (words, state) = kinds(Engine::Postgres, "$fn$ LANGUAGE sql", &state);
+    assert_eq!(words[0], (String, "$fn$".to_owned()));
+    assert_eq!(state, LineState::Code);
+    // An empty line keeps the state.
+    let open = LineState::Comment { depth: 2 };
+    assert_eq!(
+        tokens(Engine::Postgres, "", &open),
+        (Vec::new(), open.clone())
+    );
+}
+
+/// Lexing line by line, each line from the state the one before ended in,
+/// gives each byte the kind lexing the whole text gives it.
+#[test]
+fn lines_lexed_alone_agree_with_the_whole_text() {
+    let text = "SELECT 'a\nb;' AS \"x\ny\", $t$ 1;\n2 $t$ /* c\n/* d */ e */ -- f\n\
+                FROM `t` # g\nWHERE n = 1e+5; SELECT E'\\'\n' 'é😀' ;";
+    for engine in ENGINES {
+        let mut whole = vec![None; text.len()];
+        for token in Lexer::new(engine, text, LineState::Code).tokens() {
+            assert!(text.is_char_boundary(token.range.start));
+            assert!(text.is_char_boundary(token.range.end));
+            whole[token.range].fill(Some(token.kind));
+        }
+        let mut by_line = vec![None; text.len()];
+        let mut state = LineState::Code;
+        let mut offset = 0;
+        for line in text.split('\n') {
+            let (tokens, end) = tokens(engine, line, &state);
+            for token in tokens {
+                by_line[offset + token.range.start..offset + token.range.end]
+                    .fill(Some(token.kind));
+            }
+            state = end;
+            offset += line.len() + 1;
+        }
+        // The newlines inside a token belong to it in the whole text only.
+        for (at, byte) in text.bytes().enumerate() {
+            if byte != b'\n' {
+                assert_eq!(whole[at], by_line[at], "{engine:?} at {at}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_keywords_are_sorted_for_the_search() {
+    assert!(KEYWORDS.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(
+        KEYWORDS
+            .iter()
+            .all(|word| *word == word.to_ascii_uppercase())
+    );
 }
