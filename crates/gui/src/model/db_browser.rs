@@ -12,6 +12,9 @@ use marsa_core::types::{DbServer, DbSource, DbSources, DbTables};
 use super::*;
 use crate::bridge::{DbCommand, DbUpdate};
 
+mod table;
+pub use table::{DbAction, DbTab, OpenTable, PaneValue};
+
 /// What the window knows of the databases. Part of the [`Session`]: a new
 /// connection reads them again.
 #[derive(Debug, Default)]
@@ -27,9 +30,14 @@ pub struct DbBrowserState {
     pub filter: String,
     /// Why the last read failed: a client error code.
     pub error: Option<String>,
+    /// The table the user opened, of `chosen`.
+    pub open: Option<OpenTable>,
     last_id: u64,
     sources_id: Option<u64>,
     tables_id: Option<u64>,
+    rows_id: Option<u64>,
+    value_id: Option<u64>,
+    table_id: Option<u64>,
     /// A read the model asks for after an answer or an event.
     pending: Option<DbCommand>,
 }
@@ -186,6 +194,17 @@ impl Model {
         db.error = None;
         db.sources_id = None;
         db.tables_id = None;
+        db.rows_id = None;
+        db.value_id = None;
+        db.table_id = None;
+        if let Some(open) = db.open.as_mut() {
+            // The table and its sort stay; what was read goes.
+            *open = OpenTable {
+                tab: open.tab,
+                sort: open.sort.take(),
+                ..OpenTable::closed(open.table.clone())
+            };
+        }
         db.pending = connected.then_some(DbCommand::Close);
     }
 
@@ -194,6 +213,9 @@ impl Model {
         let db = &mut self.session.db;
         if db.chosen.as_ref() == Some(&source) && db.tables.is_some() {
             return None;
+        }
+        if db.chosen.as_ref() != Some(&source) {
+            db.open = None;
         }
         db.chosen = Some(source.clone());
         db.tables = None;
@@ -231,10 +253,34 @@ impl Model {
                     Ok(tables) => {
                         db.tables = Some(tables);
                         db.error = None;
+                        self.reopen_db_table();
                     }
                     Err(code) => db.error = Some(code),
                 }
             }
+            update => self.db_table_update(update),
+        }
+    }
+
+    /// The tables came: the open table, back from another screen, reads its
+    /// page again; one no longer listed closes.
+    fn reopen_db_table(&mut self) {
+        let db = &mut self.session.db;
+        let Some(open) = &db.open else {
+            return;
+        };
+        let listed = db
+            .tables
+            .iter()
+            .flat_map(|tables| &tables.tables)
+            .any(|info| info.table == open.table);
+        if !listed {
+            db.open = None;
+        } else if open.page.is_none()
+            && open.loading.is_none()
+            && let Some(Command::Db(command)) = self.read_db_rows(0, true)
+        {
+            self.session.db.pending = Some(command);
         }
     }
 
