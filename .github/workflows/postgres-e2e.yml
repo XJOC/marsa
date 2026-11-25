@@ -26,6 +26,7 @@ on:
       - "tools/e2e/api.sh"
       - "crates/app/src/daemon/db_browser/**"
       - "crates/core/src/db_browser/**"
+      - "crates/app/src/cli/db.rs"
       - ".github/workflows/postgres-e2e.yml"
   push:
     branches: [main]
@@ -43,6 +44,7 @@ on:
       - "tools/e2e/api.sh"
       - "crates/app/src/daemon/db_browser/**"
       - "crates/core/src/db_browser/**"
+      - "crates/app/src/cli/db.rs"
       - ".github/workflows/postgres-e2e.yml"
 
 # Read-only on purpose: the job never writes to the repository.

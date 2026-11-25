@@ -503,6 +503,31 @@ try {
     if ($log -match 'not properly shut down|automatic recovery') { Fail "PostgreSQL recovered after a clean stop: $log" }
     if ((PgSql 'select count(*) from posts') -ne '1') { Fail 'the data did not survive' }
 
+    Step 'the database browser: marsa db on both servers, read-only, with a cancel'
+    MarsaOk db
+    if ($script:Out -notmatch '(?m)^mysql/app\s') { Fail 'marsa db lists no mysql/app' }
+    if ($script:Out -notmatch '(?m)^postgres/root\s') { Fail 'marsa db lists no postgres/root' }
+    if ($script:Out -match '(?m)^(mysql/(mysql|sys)|postgres/(postgres|template0|template1))\s') { Fail 'a system database is listed' }
+    MarsaOk db rows mysql/app posts
+    if ($script:Out -notmatch 'Rows 1 to 1 of 1\.') { Fail "mysql rows: $script:Out" }
+    MarsaOk db rows postgres/root posts
+    if ($script:Out -notmatch 'hello') { Fail "postgres rows: $script:Out" }
+    Marsa db query mysql/app 'DELETE FROM posts'
+    if ($script:Exit -eq 0 -or $script:Out -notmatch 'db_read_only') { Fail "a write on MySQL: $script:Out" }
+    if ((MySql 'app' 'select count(*) from posts') -ne '1') { Fail 'the MySQL delete went through' }
+    Marsa db query postgres/root 'DELETE FROM posts'
+    if ($script:Exit -eq 0 -or $script:Out -notmatch 'db_read_only') { Fail "a write on PostgreSQL: $script:Out" }
+    if ((PgSql 'select count(*) from posts') -ne '1') { Fail 'the PostgreSQL delete went through' }
+    $begun = Get-Date
+    Marsa db query --timeout 2 postgres/root 'SELECT pg_sleep(60)'
+    $took = ((Get-Date) - $begun).TotalSeconds
+    Write-Host "the cancel took $([int]$took) s"
+    if ($script:Out -notmatch 'db_query_cancelled') { Fail "--timeout: $script:Out" }
+    if ($took -gt 10) { Fail "--timeout 2 took $took s" }
+    Until 'the cancelled statement ends in PostgreSQL' 5 {
+        (PgSql "select count(*) from pg_stat_activity where state = 'active' and query like 'SELECT pg_sleep%'") -eq '0'
+    }
+
     if ($WithValkey) {
         Step 'Valkey (Cygwin) in a folder with spaces: SHUTDOWN SAVE writes dump.rdb there'
         MarsaOk services start valkey
