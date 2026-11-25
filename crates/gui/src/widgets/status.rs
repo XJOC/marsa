@@ -526,6 +526,9 @@ pub enum PillState {
     /// An alert, `error`: the program stopped by an error (the reason is
     /// the screen's to say).
     Failed,
+    /// A small ring, `mute`, the word in `ink2`: a site's worker whose
+    /// switch is off. Not a problem, so not a cross.
+    Off,
 }
 
 impl PillState {
@@ -538,16 +541,18 @@ impl PillState {
             Self::Starting => strings::PILL_STARTING,
             Self::Stopping => strings::PILL_STOPPING,
             Self::Failed => strings::PILL_FAILED,
+            Self::Off => strings::PILL_OFF,
         }
     }
 
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Running,
         Self::Waiting,
         Self::Stopped,
         Self::Starting,
         Self::Stopping,
         Self::Failed,
+        Self::Off,
     ];
 }
 
@@ -602,6 +607,12 @@ pub fn pill_look(theme: &Theme, state: PillState) -> PillLook {
             ring: None,
             icon: Some((Icon::Alert, c.error)),
             text: c.error,
+        },
+        PillState::Off => PillLook {
+            fill: None,
+            ring: None,
+            icon: Some((Icon::Ring, c.mute)),
+            text: c.ink2,
         },
     }
 }
@@ -901,6 +912,8 @@ mod tests {
             assert_eq!(pill_look(theme, PillState::Starting).text, c.accent);
             assert_eq!(pill_look(theme, PillState::Stopping).text, c.accent);
             assert_eq!(pill_look(theme, PillState::Failed).text, c.error);
+            assert_eq!(pill_look(theme, PillState::Off).text, c.ink2);
+            assert_eq!(pill_look(theme, PillState::Off).fill, None);
             for state in PillState::ALL {
                 let look = pill_look(theme, state);
                 // The word on a row of a table: at rest, and under the
@@ -926,7 +939,7 @@ mod tests {
         assert_eq!(
             words,
             [
-                "Running", "Waiting", "Stopped", "Starting", "Stopping", "Failed"
+                "Running", "Waiting", "Stopped", "Starting", "Stopping", "Failed", "Off"
             ]
         );
     }
