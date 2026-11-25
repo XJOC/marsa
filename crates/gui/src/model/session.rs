@@ -115,6 +115,8 @@ pub struct Session {
     pub doctor: Option<DoctorReport>,
     /// The mail Mailpit caught, as last read.
     pub mail: MailState,
+    /// The Databases screen's lists and choice.
+    pub db: DbBrowserState,
     /// The dumps `marsad` caught, as last read.
     pub dumps: DumpsState,
 }
@@ -170,6 +172,7 @@ impl Model {
         self.session.xdebug = None;
         self.session.xdebug_pending = None;
         self.session.mail = MailState::default();
+        self.session.db = DbBrowserState::default();
         self.session.dumps = DumpsState::default();
     }
 }

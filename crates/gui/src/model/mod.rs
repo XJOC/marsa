@@ -18,10 +18,12 @@ use marsa_core::types::{
 };
 use semver::Version;
 
+mod db_browser;
 mod dumps;
 mod installs;
 mod logs;
 mod mail;
+mod messages;
 mod notices;
 mod removals;
 mod runtimes;
@@ -29,11 +31,13 @@ mod session;
 mod setup;
 mod sites;
 
+pub use db_browser::{DbBrowserState, DbScreen};
 pub use dumps::DumpsState;
 use installs::Install;
 pub use installs::{InstallJob, InstallStep, InstallView, install_version};
 pub use logs::{LogRow, LogSource, MAX_LOG_LINES, ServiceLog};
 pub use mail::{MAILPIT, MailState, mailpit_url};
+pub use messages::{Action, Update};
 pub use notices::{NoticeSource, Notices};
 pub use removals::{Removal, UninstallNotice};
 pub use runtimes::{
@@ -94,119 +98,6 @@ impl From<Option<Command>> for Effect {
     }
 }
 
-/// What the bridge sends to the window.
-#[derive(Debug)]
-pub enum Update {
-    /// Connected. A new session: the daemon may have restarted, so the old
-    /// table and log are dropped.
-    Connected(Health),
-    /// The connection ended; the bridge tries again every second.
-    Reconnecting,
-    /// The daemon cannot be reached or started. A client error code; the
-    /// bridge tries again every second.
-    Failed(String),
-    /// The whole services table.
-    Services(Vec<ServiceStatus>),
-    /// Recent lines of the services' logs (each line names its service),
-    /// oldest first.
-    Log(Vec<LogLine>),
-    /// A call failed but the connection is fine. A client error code.
-    Notice(String),
-    /// The whole site list, read when a session starts and again after the
-    /// daemon dropped events.
-    Sites(SiteList),
-    /// The daemon accepted this folder to park. The new list comes as
-    /// `sites_changed`.
-    Parked(PathBuf),
-    /// The daemon linked `folder` as the site `name`. The new list comes as
-    /// `sites_changed`.
-    Linked {
-        name: String,
-        folder: PathBuf,
-    },
-    /// A sites call failed but the connection is fine. A client error code.
-    SitesFailed(String),
-    /// Every runtime with its installed versions and default, read when a
-    /// session starts and after an install.
-    Runtimes(RuntimeList),
-    /// The runtimes could not be read. A client error code.
-    RuntimesFailed(String),
-    /// The daemon saved this change. The new state comes as an event.
-    Saved(Change),
-    /// The daemon refused this change, or could not be reached. A client
-    /// error code.
-    NotSaved {
-        change: Change,
-        code: String,
-    },
-    /// The daemon accepted `job`: its `install` events carry `id`.
-    InstallAccepted {
-        job: InstallJob,
-        id: u64,
-    },
-    /// The daemon refused `job` (`install_busy`), or could not be reached. A
-    /// client error code.
-    InstallRefused {
-        job: InstallJob,
-        code: String,
-    },
-    /// The answer to "Run setup".
-    SetupDone(SetupReport),
-    /// "Run setup" ended before the helper ran (`setup_running`,
-    /// `setup_not_supported`), or the daemon could not be reached. A client
-    /// error code.
-    SetupFailed(String),
-    /// Whether the menu-bar icon starts at login, as the daemon says.
-    Autostart(Autostart),
-    /// Reading or changing it failed. A client error code.
-    AutostartFailed(String),
-    /// The daemon removed this. After an uninstall the bridge reads the
-    /// runtimes again: no event carries them.
-    Removed(Removal),
-    /// The daemon refused or failed the removal, or could not be reached. A
-    /// client error code; `in_use` holds the facts of `version_in_use`.
-    NotRemoved {
-        removal: Removal,
-        code: String,
-        in_use: Option<VersionInUse>,
-    },
-    /// The daemon's checks, as read (no event carries them).
-    Doctor(DoctorReport),
-    /// Whether PHP loads Xdebug, as read (no event carries it).
-    Xdebug(XdebugState),
-    /// Reading it failed. A client error code.
-    XdebugFailed(String),
-    /// The answer to the Xdebug box: the state after the change, or a client
-    /// error code.
-    XdebugAnswered(Result<XdebugState, String>),
-    /// Linux: whether the hosts file holds this data
-    /// folder's names, and the sites it lacks. Read when a session starts,
-    /// after each site list, after setup, and after "Add to /etc/hosts".
-    Hosts(HostsStatus),
-    /// The answer to "Add to /etc/hosts".
-    HostsSynced(SetupReport),
-    /// "Add to /etc/hosts" did not run, or the daemon could not be reached.
-    /// A client error code.
-    HostsSyncFailed(String),
-    /// The newest mails Mailpit caught. The bridge sends a list only when it
-    /// differs from the last one it sent.
-    Mail(MailList),
-    /// The text of a mail the user opened.
-    MailText(MailText),
-    /// Reading the list failed. A client error code; `mail_not_running`
-    /// while Mailpit does not run.
-    MailFailed(String),
-    /// What the bridge read of the dumps: the ones newer than the last it
-    /// sent, or all of them when `replace`.
-    Dumps {
-        list: DumpList,
-        replace: bool,
-    },
-    /// Reading the dumps failed. A client error code.
-    DumpsFailed(String),
-    Event(Event),
-}
-
 /// The screen the main area shows (code.md, Router). The window's own
 /// state, not the daemon's: a reconnect keeps it. [Laravel: the route that
 /// picks the view.]
@@ -223,120 +114,9 @@ pub enum Route {
     Logs(LogSource),
     Mail,
     Dumps,
+    /// The database browser (ADR 0028).
+    Databases,
     Settings,
-}
-
-/// What the user did in the window. The shell and the screens return it,
-/// and [`Model::apply_action`] turns it into state, and into a bridge
-/// [`Command`] when the daemon must act (code.md, State). [Laravel: a form
-/// posted to a controller.]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Action {
-    /// A sidebar item, or the status at its bottom.
-    Navigate(Route),
-    /// The fold button of the sidebar: hide or show the labels.
-    FoldSidebar,
-    /// A service's Start, Stop, or Restart.
-    Service {
-        service: ServiceId,
-        action: ServiceAction,
-    },
-    /// A level filter of the Logs screen: show or hide its lines.
-    ToggleLogLevel(LogLevel),
-    /// The text of the filter field of the Logs screen.
-    SetLogFilter(String),
-    /// The Follow button of the Logs screen, or a scroll away from the end
-    /// of the log: keep the newest line in view, or stop.
-    SetLogFollow(bool),
-    /// A version button of the default picker (Home): save `version` as the
-    /// default of `runtime`.
-    SetDefault { runtime: Runtime, version: Version },
-    /// A fix that installs a program (Home: "Install Caddy"). Queued like a
-    /// press of Install; `Model::apply_action` sends it.
-    Install(InstallJob),
-    /// The fix "Add to /etc/hosts" (Linux).
-    SyncHosts,
-    /// "Open" on a site. A local action: `App` hands the address
-    /// ([`Model::site_url`]) to the system, never a screen (code.md, State).
-    OpenSite(String),
-    /// "Open folder" on a site's page: the system's file manager shows the
-    /// site's folder. A local action like [`Action::OpenSite`]: the model finds
-    /// the folder ([`Model::site_root`]), and `App` starts the system's opener.
-    OpenFolder(String),
-    /// The first-run button that installs what is missing.
-    StartFirstRun,
-    /// "Run setup".
-    RunSetup,
-    /// "Park a folder…" or "Link a folder…". A local action: `App` opens the
-    /// system's folder dialog, and takes the folder it gives back.
-    PickFolder(Pick),
-    /// "Not now": Home takes the place of the first-run panel.
-    CloseFirstRun,
-    /// The text of the search field of the Sites screen.
-    SearchSites(String),
-    /// An entry of a site's version menu: save `choice` as its PHP, or clear
-    /// its own setting ([`Choice::Auto`]).
-    SitePhp { site: String, choice: Choice },
-    /// The site's menu: serve it over HTTPS (`true`) or plain HTTP.
-    SetSecure { site: String, secure: bool },
-    /// "Unlink…" of a site: the confirmation opens.
-    AskUnlink(String),
-    /// "Forget…" of a parked folder: the confirmation opens.
-    AskForget(PathBuf),
-    /// The site name typed in the link form.
-    SetLinkName(String),
-    /// "Link" in the link form (or Enter): sends the link if the name is
-    /// valid.
-    SubmitLink,
-    /// "Cancel" in the link form.
-    CancelLink,
-    /// The close button of a notice, or its 4 seconds running out: the
-    /// result it told about goes.
-    DismissNotice(NoticeSource),
-    /// "Install a version…" (or the dashed "+") of a runtime: its install
-    /// dialog opens.
-    AskInstall(Runtime),
-    /// The text typed in the install dialog's version field.
-    SetInstallVersion { runtime: Runtime, text: String },
-    /// "Install" in the dialog (or Enter): queues the version in the field,
-    /// or says why it is wrong. `apply_action` returns the job to send.
-    SubmitInstall(Runtime),
-    /// "Cancel" or Escape in the install dialog.
-    CancelInstall,
-    /// "Uninstall…" in a version's row menu: the confirmation opens.
-    AskUninstall { runtime: Runtime, version: Version },
-    /// The Xdebug switch.
-    ToggleXdebug,
-    /// The confirmation's action ("Unlink", "Forget", "Uninstall"): sends the
-    /// removal it asked about.
-    ConfirmRemoval,
-    /// "Cancel" or Escape in the confirmation.
-    CancelRemoval,
-    /// The Start at login switch in Settings.
-    ToggleAutostart,
-    /// "Open folder" on the data folder in Settings. A local action like
-    /// [`Action::OpenFolder`]: `App` shows [`Model::data_dir`] in the system's
-    /// file manager.
-    OpenDataFolder,
-    /// An option of the Appearance control in Settings. `App` applies it at
-    /// once and writes it to `gui.toml`.
-    SetAppearance(Appearance),
-    /// A row of the Mail list, by the mail's id: its text is read.
-    ChooseMail(String),
-    /// "Delete all…" on Mail: the confirmation opens.
-    AskDeleteMail,
-    /// "Open Mailpit": Mailpit's page in the browser.
-    OpenMailpit,
-    /// "Open in browser": the chosen mail's page in Mailpit, with its HTML.
-    OpenMailPage,
-    /// A row of the Dumps list, by the dump's id.
-    ChooseDump(u64),
-    /// "Clear" on Dumps.
-    ClearDumps,
-    /// The switch "Capture" on Dumps.
-    ToggleDumps,
-    /// "Copy" on Dumps: the shown dump's text goes to the clipboard.
-    CopyDump,
 }
 
 /// The window's state: the daemon's session, and what belongs to the window
@@ -479,6 +259,7 @@ impl Model {
             } => self.not_removed(removal, code, in_use),
             Update::Xdebug(state) => self.session.xdebug = Some(state),
             Update::XdebugFailed(code) => self.session.notices.set_code(NoticeSource::Xdebug, code),
+            Update::Db(update) => self.db_update(update),
             Update::Mail(list) => self.set_mail(list),
             Update::MailText(text) => self.set_mail_text(text),
             Update::MailFailed(code) => self.mail_failed(code),
@@ -535,7 +316,9 @@ impl Model {
     /// for it. Called after each action and each message from the daemon, so
     /// a job that waited starts when the one before it ends.
     pub fn next_command(&mut self) -> Option<Command> {
-        self.next_install().map(Command::Install)
+        self.next_install()
+            .map(Command::Install)
+            .or_else(|| self.next_db_command())
     }
 
     /// The folder the user picked in the system's dialog.
@@ -563,6 +346,13 @@ impl Model {
                 if let Route::Runtimes(runtime) = &route {
                     self.runtime_chosen = Some(*runtime);
                 }
+                // Leaving Databases drops its lists and closes the daemon's
+                // connections; opening it reads what can be opened.
+                let databases = route == Route::Databases;
+                if self.route == Route::Databases && !databases {
+                    self.leave_databases();
+                }
+                let entered = databases && self.route != Route::Databases;
                 // No event carries mail: the screen reads it as it opens.
                 let read = route == Route::Mail;
                 // Opening the screen counts every dump as seen, and asks
@@ -570,7 +360,9 @@ impl Model {
                 let dumps = route == Route::Dumps;
                 self.session.dumps.set_open(dumps);
                 self.route = route;
-                if read {
+                if entered {
+                    self.open_databases()
+                } else if read {
                     self.read_mail()
                 } else if dumps && self.is_connected() {
                     Some(Command::ReadDumps)
@@ -691,6 +483,12 @@ impl Model {
                 Removal::Mail => Command::ClearMail,
                 removal => Command::Remove(removal),
             }),
+            Action::ChooseDbSource(source) => self.choose_db_source(source),
+            Action::FilterDbTables(text) => {
+                self.filter_db_tables(text);
+                None
+            }
+            Action::ReadDbSources => self.open_databases(),
             Action::ChooseMail(id) => self.choose_mail(id),
             Action::ChooseDump(id) => {
                 self.choose_dump(id);
@@ -728,6 +526,24 @@ impl Model {
 pub fn apply(model: &mut Model, event: Event) {
     match event {
         Event::ServiceChanged(status) => {
+            // A SQL server started or stopped: what Databases can open changed.
+            let sql_server = matches!(
+                status.id,
+                ServiceId::Database(
+                    marsa_core::databases::ServerKind::Mysql
+                        | marsa_core::databases::ServerKind::Postgres
+                )
+            );
+            if sql_server
+                && model
+                    .session
+                    .services
+                    .iter()
+                    .find(|s| s.id == status.id)
+                    .is_none_or(|old| old.state != status.state)
+            {
+                model.db_sources_changed();
+            }
             // A new run of a service may get a new log buffer whose `seq`
             // starts again at 0, so the old `seq` must not hide it.
             if status.state == ServiceState::Starting
@@ -747,7 +563,10 @@ pub fn apply(model: &mut Model, event: Event) {
         Event::Log(line) => model.push_log(line),
         Event::Install(progress) => model.install_event(progress),
         // The whole new list: no need to ask the daemon again.
-        Event::SitesChanged(list) => model.set_sites(list),
+        Event::SitesChanged(list) => {
+            model.set_sites(list);
+            model.db_sources_changed();
+        }
         Event::DefaultChanged(default) => {
             let row = model
                 .session

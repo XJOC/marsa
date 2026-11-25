@@ -5,6 +5,7 @@
 //! One file per domain; this module re-exports them all, so a screen writes
 //! `strings::NAME` whatever file the text lives in.
 
+mod db_browser;
 mod dumps;
 mod errors;
 mod home;
@@ -18,6 +19,7 @@ mod tray;
 #[cfg(test)]
 pub(crate) mod tests;
 
+pub use db_browser::*;
 pub use dumps::*;
 pub use errors::*;
 pub use home::*;
