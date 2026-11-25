@@ -8,6 +8,7 @@
 mod db_browser;
 mod dumps;
 mod mail;
+mod site_log;
 
 pub use db_browser::{DbCommand, DbUpdate};
 
@@ -77,6 +78,11 @@ pub enum Command {
     SetDumpsCapture(bool),
     /// A read of the Databases screen, or its close.
     Db(DbCommand),
+    /// Logs shows the log of this Laravel site: follow it, in place of the
+    /// one followed before.
+    FollowSiteLog(String),
+    /// Logs no longer shows a site's log: stop following it.
+    StopSiteLog,
 }
 
 /// The window's end of the bridge.
@@ -262,6 +268,7 @@ async fn session(
     // Stops with this session when it is dropped.
     let mail = mail::Mail::start(&client, window);
     let dumps = dumps::Dumps::start(&client, window);
+    let mut site_log = site_log::SiteLog::default();
     if !window.send(Update::Connected(health)) || !refresh(&client, window, &mail).await {
         return End::Closed;
     }
@@ -330,6 +337,8 @@ async fn session(
                 Some(Command::ReadDumps) => dumps.send(dumps::Job::Read),
                 Some(Command::ClearDumps) => dumps.send(dumps::Job::Clear),
                 Some(Command::SetDumpsCapture(on)) => dumps.send(dumps::Job::Capture(on)),
+                Some(Command::FollowSiteLog(site)) => site_log.follow(&client, window, site),
+                Some(Command::StopSiteLog) => site_log.stop(),
                 Some(command) => run_command(&client, command, window.clone(), reread.clone()),
                 None => return End::Closed,
             },
@@ -587,6 +596,8 @@ fn run_command(
             Command::ReadMail | Command::ReadMailText(_) | Command::ClearMail => None,
             // The session's dumps reader runs these, one at a time.
             Command::ReadDumps | Command::ClearDumps | Command::SetDumpsCapture(_) => None,
+            // The session's site log reader runs these.
+            Command::FollowSiteLog(_) | Command::StopSiteLog => None,
             Command::SetXdebug(enabled) => Some(match client.set_xdebug(enabled).await {
                 Ok(state) => {
                     tracing::info!(enabled, "Xdebug changed");

@@ -219,5 +219,6 @@ impl Model {
     pub(super) fn set_sites(&mut self, mut list: SiteList) {
         list.sites.sort_by(|a, b| a.name.cmp(&b.name));
         self.session.sites = list;
+        self.leave_gone_site_log();
     }
 }

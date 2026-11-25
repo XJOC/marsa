@@ -138,22 +138,24 @@ pub(crate) fn view<'a>(model: &'a Model, source: &LogSource) -> LogsView<'a> {
         .iter()
         .map(|service| service.id)
         .filter(|id| *id != ServiceId::Caddy);
-    let mut ids: Vec<ServiceId> = std::iter::once(ServiceId::Caddy).chain(others).collect();
-    // The log the user is on stays pickable if its service went away.
-    if !ids.contains(&source.id()) {
-        ids.push(source.id());
-    }
-    let current = ids
-        .iter()
-        .position(|id| *id == source.id())
-        .unwrap_or_default();
-    let sources = ids
-        .iter()
+    let mut sources: Vec<SourceView> = std::iter::once(ServiceId::Caddy)
+        .chain(others)
         .map(|id| SourceView {
-            source: LogSource::of(*id),
-            name: model::service_name(*id),
+            source: LogSource::of(id),
+            name: model::service_name(id),
         })
         .collect();
+    // The log the user is on stays pickable if its service went away.
+    if !sources.iter().any(|view| view.source == *source) {
+        sources.push(SourceView {
+            source: source.clone(),
+            name: source_name(source),
+        });
+    }
+    let current = sources
+        .iter()
+        .position(|view| view.source == *source)
+        .unwrap_or_default();
     LogsView {
         sources,
         current,
@@ -167,11 +169,20 @@ pub(crate) fn view<'a>(model: &'a Model, source: &LogSource) -> LogsView<'a> {
     }
 }
 
+/// What the source list calls the log of `source`.
+fn source_name(source: &LogSource) -> String {
+    match source {
+        LogSource::Caddy => model::service_name(ServiceId::Caddy),
+        LogSource::Service(id) => model::service_name(*id),
+        LogSource::Site(site) => strings::site_log_source(site),
+    }
+}
+
 fn body<'a>(model: &'a Model, source: &LogSource) -> Body<'a> {
-    let rows = model.log_rows(source.id());
+    let rows = model.source_rows(source);
     if rows.is_empty() {
         return if model.is_connected() {
-            Body::Empty(model::service_name(source.id()))
+            Body::Empty(source_name(source))
         } else {
             Body::Offline
         };

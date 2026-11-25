@@ -13,8 +13,8 @@ use marsa_core::runtimes::Runtime;
 use marsa_core::types::{
     DoctorReport, DumpList, Event, Health, HostsStatus, InstallEvent, InstallFailure,
     InstallProgress, InstallUpdate, LogLine, MailList, MailText, PoolKind, RuntimeList,
-    ServiceAction, ServiceId, ServiceState, ServiceStatus, SetupReport, Site, SiteList, Source,
-    VersionInUse, XdebugState,
+    ServiceAction, ServiceId, ServiceState, ServiceStatus, SetupReport, Site, SiteList,
+    SiteLogLine, Source, VersionInUse, XdebugState,
 };
 use semver::Version;
 
@@ -37,6 +37,7 @@ pub use db_browser::{
 pub use dumps::DumpsState;
 use installs::Install;
 pub use installs::{InstallJob, InstallStep, InstallView, install_version};
+use logs::SiteLogState;
 pub use logs::{LogRow, LogSource, MAX_LOG_LINES, ServiceLog};
 pub use mail::{MAILPIT, MailState, mailpit_url};
 pub use messages::{Action, Update};
@@ -202,6 +203,8 @@ impl Model {
                 self.session.services = services;
             }
             Update::Log(lines) => lines.into_iter().for_each(|line| self.push_log(line)),
+            Update::SiteLog { site, lines } => self.push_site_log(&site, lines),
+            Update::SiteLogFailed { site, code } => self.site_log_failed(&site, code),
             Update::Notice(code) => self.session.notices.set_code(NoticeSource::Call, code),
             Update::Sites(list) => self.set_sites(list),
             Update::Parked(path) => self.session.notices.set_sites(SitesNotice::Parked(path)),
@@ -319,11 +322,13 @@ impl Model {
 
     /// The command the window's next queued job needs, if the daemon is free
     /// for it. Called after each action and each message from the daemon, so
-    /// a job that waited starts when the one before it ends.
+    /// a job that waited starts when the one before it ends, and the reader
+    /// of a site's log follows what Logs shows.
     pub fn next_command(&mut self) -> Option<Command> {
         self.next_install()
             .map(Command::Install)
             .or_else(|| self.next_db_command())
+            .or_else(|| self.next_site_log_command())
     }
 
     /// The folder the user picked in the system's dialog.
@@ -365,6 +370,7 @@ impl Model {
                 let dumps = route == Route::Dumps;
                 self.session.dumps.set_open(dumps);
                 self.route = route;
+                self.leave_gone_site_log();
                 if entered {
                     self.open_databases()
                 } else if read {
