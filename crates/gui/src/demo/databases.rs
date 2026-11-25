@@ -3,12 +3,13 @@
 //! `users`, a cell chosen and its value open.
 
 use marsa_core::types::{
-    DbCell, DbColumnKind, DbDatabase, DbPage, DbPageColumn, DbServer, DbServerInfo, DbSiteFile,
-    DbSource, DbSources, DbTableInfo, DbTableKind, DbTableRef, DbTables, DbTotal, ServiceState,
+    DbCell, DbColumn, DbColumnKind, DbDatabase, DbKey, DbPage, DbPageColumn, DbServer,
+    DbServerInfo, DbSiteFile, DbSource, DbSources, DbTable, DbTableInfo, DbTableKind, DbTableRef,
+    DbTables, DbTotal, ServiceState,
 };
 
 use super::Demo;
-use crate::model::{Model, OpenTable, Route};
+use crate::model::{DbTab, Model, OpenTable, Route};
 
 pub(super) fn fill(model: &mut Model, demo: Demo) {
     model.route = Route::Databases;
@@ -70,8 +71,13 @@ pub(super) fn fill(model: &mut Model, demo: Demo) {
             table("users", DbTableKind::Table, Some(1_250_000)),
         ],
     });
-    if demo == Demo::DatabasesRows {
-        db.open = Some(users_open());
+    if matches!(demo, Demo::DatabasesRows | Demo::DatabasesColumns) {
+        let mut open = users_open();
+        if demo == Demo::DatabasesColumns {
+            open.tab = DbTab::Columns;
+            open.columns = Some(users_columns());
+        }
+        db.open = Some(open);
     }
 }
 
@@ -148,4 +154,26 @@ fn users_open() -> OpenTable {
     open.current = (Some(0), 5);
     open.pane = true;
     open
+}
+
+/// The columns of `users`, as Laravel's first migration makes them.
+fn users_columns() -> DbTable {
+    let column = |name: &str, type_name: &str, nullable, default: Option<&str>, key| DbColumn {
+        name: name.into(),
+        type_name: type_name.into(),
+        nullable,
+        default: default.map(Into::into),
+        key,
+    };
+    DbTable {
+        columns: vec![
+            column("id", "bigint unsigned", false, None, Some(DbKey::Primary)),
+            column("name", "varchar(255)", false, None, None),
+            column("email", "varchar(255)", false, None, Some(DbKey::Unique)),
+            column("email_verified_at", "timestamp", true, None, None),
+            column("is_admin", "tinyint(1)", false, Some("0"), None),
+            column("settings", "json", true, None, None),
+            column("created_at", "timestamp", true, None, None),
+        ],
+    }
 }

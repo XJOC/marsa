@@ -74,5 +74,9 @@ pub const DB_LIST_END: f32 = 64.0;
 pub const DB_DETAIL_END: f32 = 180.0;
 /// The value pane under the grid (layout.md, "Tables view, a table chosen").
 pub const DB_VALUE_HEIGHT: f32 = 128.0;
+/// The Columns tab's fixed columns: the type, Null (Yes, No), the key tag.
+pub const DB_COLUMN_TYPE: f32 = 160.0;
+pub const DB_COLUMN_NULL: f32 = 72.0;
+pub const DB_COLUMN_KEY: f32 = 120.0;
 pub const DUMPS_FACT_LABEL: f32 = 60.0;
 pub const DUMPS_STATE_WIDTH: f32 = MAIL_STATE_WIDTH;

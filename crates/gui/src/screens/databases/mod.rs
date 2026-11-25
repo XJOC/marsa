@@ -14,13 +14,14 @@ use eframe::egui::{
 use marsa_core::types::{DbServer, DbSource, DbTableKind, DbTableRef, ServiceAction, ServiceId};
 
 use super::lines::{message, state};
-use crate::model::{Action, DbAction, DbScreen, Model, OpenTable};
+use crate::model::{Action, DbAction, DbScreen, DbTab, Model, OpenTable};
 use crate::strings;
 use crate::theme::page::{DB_DETAIL_END, DB_LIST_END, DB_LIST_WIDTH};
 use crate::theme::{Direction, Section, Theme};
 use crate::widgets::list_item;
 use crate::widgets::menu::{Item as MenuItem, Menu};
 use crate::widgets::table::card;
+use crate::widgets::tabs::Tabs;
 use crate::widgets::{Button, Field, Text};
 use crate::widgets::{Look, Touch};
 
@@ -52,6 +53,7 @@ pub(crate) enum Body<'a> {
     Tables(Tables<'a>),
 }
 
+mod columns;
 mod rows;
 
 /// Refresh: F5, or Cmd R on macOS and Ctrl R elsewhere.
@@ -324,7 +326,8 @@ fn list_keys(ui: &mut Ui, tables: &Tables<'_>, actions: &mut Vec<Action>) {
     }
 }
 
-/// The open table: its name and Refresh, then its rows.
+/// The open table: its name, the tabs Rows and Columns, and Refresh; then
+/// the chosen tab.
 fn table_view(ui: &mut Ui, theme: &Theme, open: &OpenTable, actions: &mut Vec<Action>) {
     ui.spacing_mut().item_spacing.y = theme.space.s3;
     let line = vec2(ui.available_width(), theme.size.control);
@@ -334,8 +337,26 @@ fn table_view(ui: &mut Ui, theme: &Theme, open: &OpenTable, actions: &mut Vec<Ac
             _ => open.table.name.clone(),
         };
         ui.add(Text::new(&name, theme.text.heading, theme.color.ink).truncate());
+        ui.add_space(theme.space.s4);
+        // The tabs take what Refresh leaves: their strip fills its width.
+        let refresh = Button::secondary(strings::DB_REFRESH).in_row();
+        let room = ui.available_width() - refresh.width(ui) - theme.space.s3;
+        let tabs = [
+            (DbTab::Rows, strings::DB_ROWS_TAB),
+            (DbTab::Columns, strings::DB_COLUMNS_TAB),
+        ];
+        let strip = vec2(room.max(0.0), theme.size.control);
+        let chosen = ui
+            .allocate_ui_with_layout(strip, Direction::CURRENT.row(), |ui| {
+                Tabs::new(strings::DB_TABLE_TABS, &tabs, open.tab)
+                    .show(ui)
+                    .inner
+            })
+            .inner;
+        if let Some(tab) = chosen {
+            actions.push(Action::Db(DbAction::Tab(tab)));
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let refresh = Button::secondary(strings::DB_REFRESH).in_row();
             let keys = ui.input_mut(|input| {
                 REFRESH_KEYS
                     .iter()
@@ -346,7 +367,10 @@ fn table_view(ui: &mut Ui, theme: &Theme, open: &OpenTable, actions: &mut Vec<Ac
             }
         });
     });
-    rows::show(ui, theme, open, actions);
+    match open.tab {
+        DbTab::Rows => rows::show(ui, theme, open, actions),
+        DbTab::Columns => columns::show(ui, theme, open),
+    }
 }
 
 /// The tables with their kind and estimate, then a caption.

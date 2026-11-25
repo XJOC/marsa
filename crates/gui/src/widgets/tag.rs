@@ -7,12 +7,14 @@ use eframe::egui::{
     vec2,
 };
 
-use crate::theme::Theme;
+use crate::theme::{Section, Theme};
 
 /// A framed word, `height` high (`size.tag` or `size.tag_in_grid`).
 pub struct Tag<'a> {
     word: &'a str,
     height: f32,
+    /// A key tag: filled with this section's tint, in its color.
+    section: Option<Section>,
 }
 
 impl<'a> Tag<'a> {
@@ -21,6 +23,17 @@ impl<'a> Tag<'a> {
         Self {
             word,
             height: theme.size.tag,
+            section: None,
+        }
+    }
+
+    /// A column's key ("Primary key", "Unique"): the section's tint, no
+    /// frame, the word in the section's color.
+    pub fn key(word: &'a str, theme: &Theme, section: Section) -> Self {
+        Self {
+            word,
+            height: theme.size.tag,
+            section: Some(section),
         }
     }
 
@@ -29,6 +42,7 @@ impl<'a> Tag<'a> {
         Self {
             word,
             height: theme.size.tag_in_grid,
+            section: None,
         }
     }
 }
@@ -39,7 +53,10 @@ impl Widget for Tag<'_> {
         let size = vec2(width(ui.painter(), theme, self.word), self.height);
         let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
         if ui.is_rect_visible(rect) {
-            paint(ui.painter(), theme, rect.min, self.word, self.height);
+            match self.section {
+                None => paint(ui.painter(), theme, rect.min, self.word, self.height),
+                Some(section) => paint_key(ui.painter(), theme, rect, self.word, section),
+            }
         }
         response.on_hover_text(self.word)
     }
@@ -67,4 +84,14 @@ pub(crate) fn paint(painter: &Painter, theme: &Theme, min: Pos2, word: &str, hei
     );
     let at = Align2::CENTER_CENTER.anchor_size(rect.center(), galley.size());
     painter.galley(at.min, galley, theme.color.ink2);
+}
+
+fn paint_key(painter: &Painter, theme: &Theme, rect: Rect, word: &str, section: Section) {
+    let colors = theme.section(section);
+    let corner = CornerRadius::same(theme.radius.sm);
+    painter.rect_filled(rect, corner, colors.tint);
+    let font = theme.text.caption.font_id();
+    let galley = painter.layout_no_wrap(word.to_owned(), font, colors.fg);
+    let at = Align2::CENTER_CENTER.anchor_size(rect.center(), galley.size());
+    painter.galley(at.min, galley, colors.fg);
 }

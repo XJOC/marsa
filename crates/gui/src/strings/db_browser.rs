@@ -200,3 +200,25 @@ pub fn value_caption(kind: marsa_core::types::DbColumnKind, bytes: u64) -> Strin
     };
     format!("{kind} · {}", size(bytes))
 }
+
+/// The column titles of the Columns tab.
+pub const DB_COLUMN: &str = "Column";
+pub const DB_TYPE: &str = "Type";
+pub const DB_NULL: &str = "Null";
+pub const DB_DEFAULT: &str = "Default";
+pub const DB_KEY: &str = "Key";
+/// What a screen reader hears for the table of columns.
+pub const DB_COLUMNS_LABEL: &str = "Columns";
+
+/// Whether a column takes NULL.
+pub fn yes_no(yes: bool) -> &'static str {
+    if yes { "Yes" } else { "No" }
+}
+
+/// A column's key, as a tag.
+pub fn key_name(key: marsa_core::types::DbKey) -> &'static str {
+    match key {
+        marsa_core::types::DbKey::Primary => "Primary key",
+        marsa_core::types::DbKey::Unique => "Unique",
+    }
+}
