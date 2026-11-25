@@ -28,6 +28,7 @@ on:
       - "tools/e2e/api.sh"
       - "crates/app/src/daemon/db_browser/**"
       - "crates/core/src/db_browser/**"
+      - "crates/app/src/cli/db.rs"
       - "tools/libaio-build/**"
       - ".github/workflows/mysql-e2e.yml"
   push:
@@ -46,6 +47,7 @@ on:
       - "tools/e2e/api.sh"
       - "crates/app/src/daemon/db_browser/**"
       - "crates/core/src/db_browser/**"
+      - "crates/app/src/cli/db.rs"
       - "tools/libaio-build/**"
       - ".github/workflows/mysql-e2e.yml"
 

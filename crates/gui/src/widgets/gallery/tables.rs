@@ -1,12 +1,15 @@
 //! The tables page of the gallery.
 
 use eframe::egui::{Ui, vec2};
+use marsa_core::db_browser::Engine;
 use marsa_core::types::{DbCell, DbColumnKind, DbPageColumn};
 
 use crate::strings;
 use crate::theme::{Section, Theme};
 use crate::widgets::badge::RowBadge;
 use crate::widgets::button::Button;
+use crate::widgets::editor::Editor;
+use crate::widgets::editor::buffer::Buffer;
 use crate::widgets::facts::fact_card;
 use crate::widgets::grid::{Grid, GridEvent, column_widths};
 use crate::widgets::icons::{Glyph, Icon};
@@ -129,6 +132,9 @@ pub(super) fn tables_page(ui: &mut Ui, theme: &Theme) {
     heading(ui, theme, label::GRID);
     grid(ui, theme, &mut live);
 
+    heading(ui, theme, label::EDITOR);
+    editor(ui, &mut live);
+
     heading(ui, theme, label::EMPTY);
     empty_state(ui, "No sites yet.", "Add site…");
 
@@ -207,4 +213,24 @@ fn grid(ui: &mut Ui, theme: &Theme, live: &mut Live) {
             _ => {}
         }
     }
+}
+
+/// A short query, with a comment over two lines and a string.
+const SAMPLE_SQL: &str = "/* The orders of one customer,
+   newest first. */
+select id, total, 'paid' as state
+from orders
+where customer_id = 42
+order by id desc
+limit 50;";
+
+/// The rows the sample editor shows.
+const EDITOR_LINES: usize = 6;
+
+fn editor(ui: &mut Ui, live: &mut Live) {
+    let limit = marsa_core::db_browser::SQL_BYTES;
+    let buffer = live
+        .sql
+        .get_or_insert_with(|| Buffer::new(SAMPLE_SQL, limit));
+    Editor::new("gallery_sql", "SQL", buffer, Engine::Postgres, EDITOR_LINES).show(ui);
 }

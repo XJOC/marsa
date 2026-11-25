@@ -35,6 +35,9 @@ on:
       - "recipes/postgres.toml"
       - "recipes/valkey.toml"
       - "tools/e2e/windows-databases.ps1"
+      - "crates/app/src/daemon/db_browser/**"
+      - "crates/core/src/db_browser/**"
+      - "crates/app/src/cli/db.rs"
       - ".github/workflows/windows-databases-e2e.yml"
 
 # Read-only on purpose: the job never writes to the repository. `actions:

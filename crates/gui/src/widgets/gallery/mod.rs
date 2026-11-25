@@ -60,6 +60,8 @@ mod label {
         "Table: two-line rows, the second selected, hover a row to see it";
     pub(super) const TABLE_DENSE: &str = "Dense table (32): click a row to select it";
     pub(super) const EMPTY: &str = "Empty state";
+    pub(super) const EDITOR: &str =
+        "SQL editor: click in, type; Tab leaves, Cmd or Ctrl Enter runs (nothing here)";
     pub(super) const GRID: &str = "Data grid: Tab in, the arrows, Home, End, Enter on a header sorts; \
          numbers at the end, NULL as a tag, binary as its size";
     pub(super) const TABS: &str =
@@ -121,6 +123,8 @@ struct Live {
     /// The live grid's current cell and sorted column.
     cell: (Option<usize>, usize),
     sorted: Option<(usize, bool)>,
+    /// The live SQL editor's text.
+    sql: Option<crate::widgets::editor::buffer::Buffer>,
     /// The live dialog is open, and what it answered last.
     dialog: bool,
     answer: Option<Answer>,

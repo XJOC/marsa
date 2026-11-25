@@ -113,11 +113,13 @@ impl<C: Send + 'static> Store<C> {
             .collect()
     }
 
-    /// The task that closes idle connections, every quarter of the idle
-    /// time, until none is left or the daemon shuts down.
+    /// The task that closes idle connections, until none is left or the
+    /// daemon shuts down. It looks every twelfth of the idle time, so a
+    /// connection closes at most that late: 65 s after its last use for an
+    /// idle time of 60 s.
     pub(super) fn spawn_reaper(self: &Arc<Self>, shutdown: CancellationToken) {
         let store = Arc::clone(self);
-        let every = store.idle / 4;
+        let every = store.idle / 12;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
