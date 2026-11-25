@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use marsa_core::types::DbServer;
 
-use super::sqlite;
+use super::{servers, sqlite};
 use crate::daemon::http::test_router::TestRouter;
 use crate::daemon::state::Daemon;
 
@@ -832,4 +832,12 @@ async fn a_whole_value_is_read_by_the_rows_key() {
     // A value that is not a key is bound, never written into the SQL.
     let (status, _) = cell(&app, "docs", "body", json!(["1 OR 1=1"])).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn a_server_connection_keeps_few_prepared_statements() {
+    // The driver's options say their cache size only in their `Debug`.
+    let kept = format!("statement_cache_capacity: {}", servers::STATEMENT_CACHE);
+    assert!(format!("{:?}", servers::mysql_options(3306, Some("shop"))).contains(&kept));
+    assert!(format!("{:?}", servers::pg_options(5432, None)).contains(&kept));
 }
