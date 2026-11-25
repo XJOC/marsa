@@ -14,6 +14,7 @@ mod runtimes;
 mod services;
 mod setup;
 mod sites;
+mod workers;
 
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,7 @@ pub use runtimes::*;
 pub use services::*;
 pub use setup::*;
 pub use sites::*;
+pub use workers::*;
 
 use std::path::Path;
 

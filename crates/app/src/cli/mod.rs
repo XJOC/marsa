@@ -23,6 +23,7 @@ pub mod strings;
 pub mod text;
 pub mod uninstall;
 pub mod uninstall_all;
+pub mod workers;
 pub mod xdebug;
 
 use std::borrow::Cow;
