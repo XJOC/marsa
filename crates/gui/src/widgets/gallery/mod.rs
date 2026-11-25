@@ -60,6 +60,8 @@ mod label {
         "Table: two-line rows, the second selected, hover a row to see it";
     pub(super) const TABLE_DENSE: &str = "Dense table (32): click a row to select it";
     pub(super) const EMPTY: &str = "Empty state";
+    pub(super) const GRID: &str = "Data grid: Tab in, the arrows, Home, End, Enter on a header sorts; \
+         numbers at the end, NULL as a tag, binary as its size";
     pub(super) const TABS: &str =
         "Tabs (the site page): click or use the arrows; only Overview ships now";
     pub(super) const FACTS: &str = "Facts card (the site page): a label column, then each value";
@@ -116,6 +118,9 @@ struct Live {
     row: Option<usize>,
     /// The tab the live tab strip has chosen.
     tab: usize,
+    /// The live grid's current cell and sorted column.
+    cell: (Option<usize>, usize),
+    sorted: Option<(usize, bool)>,
     /// The live dialog is open, and what it answered last.
     dialog: bool,
     answer: Option<Answer>,

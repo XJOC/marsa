@@ -104,3 +104,23 @@ pub fn rows_about(rows: u64) -> String {
     }
     format!("about {grouped}")
 }
+
+/// A null in a grid cell: a tag, never a color alone.
+pub const NULL_TAG: &str = "NULL";
+
+/// A binary value: only its size travels. "(binary, 14.2 KB)".
+pub fn binary_value(bytes: u64) -> String {
+    let size = if bytes < 1000 {
+        format!("{bytes} B")
+    } else if bytes < 1_000_000 {
+        format!("{:.1} KB", bytes as f64 / 1000.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    };
+    format!("(binary, {size})")
+}
+
+/// What a screen reader hears for a grid.
+pub fn grid_label(rows: usize, columns: usize) -> String {
+    format!("Grid, {rows} rows, {columns} columns")
+}
