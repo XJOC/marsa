@@ -113,32 +113,89 @@ sample() {
   return 0
 }
 
-SOURCE='{"kind":"site_file","site":"blog"}'
-step "200 pages, one whole value, and a statement of 1,000 rows"
-for page in $(seq 0 199); do
-  body=$(jq -cn --argjson source "$SOURCE" --argjson offset $((page * 500)) \
-    '{source: $source, table: {name: "big"}, offset: $offset}')
-  rows=$(api_ok POST /v1/db/rows "$body" | jq '.rows | length')
-  [ "$rows" = 500 ] || fail "page $page has $rows rows"
-  if [ $((page % 10)) = 0 ]; then sample; fi
-done
-body=$(jq -cn --argjson source "$SOURCE" \
-  '{source: $source, table: {name: "wide"}, column: "value", key: ["1"]}')
-api_ok POST /v1/db/cell "$body" >/dev/null
-sample
-id=$(api_query "$SOURCE" "select * from big limit 1000")
-[ "$(api_job_end "$id" | jq -r .status)" = done ] || fail "the statement did not end done"
-kept=$(api_ok GET "/v1/db/results/$id" | jq '.rows | length')
-[ "$kept" = 1000 ] || fail "the statement kept $kept rows"
-sample
+# The threads of process $1.
+threads() {
+  case "$(uname -s)" in
+    Linux) ls "/proc/$1/task" | wc -l | tr -d ' ' ;;
+    *) ps -M -p "$1" | tail -n +2 | wc -l | tr -d ' ' ;;
+  esac
+}
 
-step "close, then 30 s"
-api_ok POST /v1/db/close >/dev/null
-sleep 30
+# heap: where marsad's resident memory is. On Linux, anonymous memory
+# (the heap, the stacks) against file pages (the program's code). On macOS,
+# the malloc zone: the bytes still allocated against the pages it holds;
+# the difference is freed memory the allocator keeps for reuse.
+heap() {
+  case "$(uname -s)" in
+    Linux) awk '/^(RssAnon|RssFile):/ { printf "      %s %s KiB\n", $1, $2 }' "/proc/$PID/status" ;;
+    *)
+      command -v vmmap >/dev/null || return 0
+      vmmap --summary "$PID" 2>/dev/null | awk '
+        /^MALLOC ZONE/ { zones = 1; next }
+        zones && /^DefaultMallocZone/ {
+          printf "      malloc zone: %s resident, %s allocated, %s free in the zone\n", $3, $7, $8
+        }'
+      ;;
+  esac
+}
+
+# at NAME: marsad's memory and threads now, to find where memory stays.
+at() {
+  sample
+  printf '  %-26s %7s KiB  %3s threads\n' "$1" "$(rss "$PID")" "$(threads "$PID")"
+  case "$1" in "before open" | "after close + 30 s") heap ;; esac
+}
+
+SOURCE='{"kind":"site_file","site":"blog"}'
+
+# browse: one visit of the window: the sources and the tables, 200 pages,
+# one whole value, a statement of 1,000 rows, then close and 30 s.
+browse() {
+  at "before open"
+  api_ok GET /v1/db/sources >/dev/null
+  api_ok POST /v1/db/tables "$(jq -cn --argjson source "$SOURCE" '{source: $source}')" >/dev/null
+  at "after open"
+  local page body rows id kept
+  for page in $(seq 0 199); do
+    body=$(jq -cn --argjson source "$SOURCE" --argjson offset $((page * 500)) \
+      '{source: $source, table: {name: "big"}, offset: $offset}')
+    rows=$(api_ok POST /v1/db/rows "$body" | jq '.rows | length')
+    [ "$rows" = 500 ] || fail "page $page has $rows rows"
+    if [ $((page % 10)) = 0 ]; then sample; fi
+  done
+  body=$(jq -cn --argjson source "$SOURCE" \
+    '{source: $source, table: {name: "wide"}, column: "value", key: ["1"]}')
+  api_ok POST /v1/db/cell "$body" >/dev/null
+  at "after browse"
+  id=$(api_query "$SOURCE" "select * from big limit 1000")
+  [ "$(api_job_end "$id" | jq -r .status)" = done ] || fail "the statement did not end done"
+  kept=$(api_ok GET "/v1/db/results/$id" | jq '.rows | length')
+  [ "$kept" = 1000 ] || fail "the statement kept $kept rows"
+  at "after SQL"
+  api_ok POST /v1/db/close >/dev/null
+  at "after close"
+  sleep 15
+  at "after close + 15 s"
+  sleep 15
+  at "after close + 30 s"
+}
+
+step "200 pages, one whole value, and a statement of 1,000 rows; close, then 30 s"
+browse
 after=$(rss "$PID")
-stop
 close_growth=$((after - before))
 echo "browsing: $before KiB before the first request, peak $peak KiB, $after KiB 30 s after close: ${close_growth} KiB (limit $CLOSE_LIMIT_KIB)"
+
+# Recorded, not a limit: if the second and third visits add almost
+# nothing, what stays after the first is memory the allocator keeps for
+# reuse, not memory that grows with each visit.
+step "the same visit twice more (recorded)"
+for cycle in 2 3; do
+  echo "visit $cycle:"
+  browse
+done
+echo "after 3 visits: $(rss "$PID") KiB; after 1: $after KiB; before: $before KiB"
+stop
 
 step "the budget"
 abs() { local n=$1; echo "${n#-}"; }
