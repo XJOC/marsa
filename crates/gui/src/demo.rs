@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review.
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|many-sites|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|logs-laravel|logs-laravel-errors|mail|mail-empty|mail-stopped|dumps|dumps-empty|dumps-off|dumps-busy|dumps-long|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|many-sites|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|site-workers|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|logs-laravel|logs-laravel-errors|mail|mail-empty|mail-stopped|dumps|dumps-empty|dumps-off|dumps-busy|dumps-long|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -27,6 +27,7 @@ mod databases;
 mod dumps;
 mod mail;
 mod site_log;
+mod workers;
 
 /// The variable that names the state.
 const VAR: &str = "MARSA_GUI_DEMO";
@@ -58,6 +59,10 @@ pub enum Demo {
     /// The same as `Ok`, with `~/Code` parked: the sites in it come from that
     /// folder, so their pages cannot unlink them.
     SiteParked,
+    /// The same as `Ok`, with the workers of `shop` (queue running,
+    /// scheduler off) and of `billing-api` (queue failed, scheduler
+    /// starting): the Workers card of their pages.
+    SiteWorkers,
     /// The same as `Ok`, with Node.js and Composer listed too, and the Xdebug
     /// state read: the Runtimes screen.
     Runtimes,
@@ -151,6 +156,7 @@ fn parse(name: &str) -> Option<Demo> {
         "sites-empty" => Demo::SitesEmpty,
         "sites-extras" => Demo::SitesExtras,
         "site-parked" => Demo::SiteParked,
+        "site-workers" => Demo::SiteWorkers,
         "runtimes" => Demo::Runtimes,
         "runtimes-installing" => Demo::RuntimesInstalling,
         "runtimes-install" => Demo::RuntimesInstall,
@@ -244,6 +250,9 @@ pub fn fill(model: &mut Model, demo: Demo) {
     }
     if demo == Demo::SiteParked {
         model.session.sites.parked = vec![PathBuf::from("/demo/Code")];
+    }
+    if demo == Demo::SiteWorkers {
+        workers::fill(model);
     }
     if matches!(
         demo,
@@ -711,6 +720,36 @@ fn many_sites() -> SiteList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_workers_demo_shows_each_state_of_the_card() {
+        use marsa_core::types::{SiteKey, WorkerKind};
+
+        assert_eq!(parse("site-workers"), Some(Demo::SiteWorkers));
+        let mut model = Model::default();
+        fill(&mut model, Demo::SiteWorkers);
+        let state = |kind, site| {
+            let key = SiteKey::new(site).expect("a demo site");
+            model
+                .worker_status(kind, key)
+                .map(|status| status.state.clone())
+        };
+        assert_eq!(
+            state(WorkerKind::Queue, "shop"),
+            Some(ServiceState::Running)
+        );
+        assert_eq!(state(WorkerKind::Schedule, "shop"), None);
+        let failed = ServiceState::Failed {
+            code: "worker_failed".into(),
+        };
+        assert_eq!(state(WorkerKind::Queue, "billing-api"), Some(failed));
+        assert_eq!(state(WorkerKind::Schedule, "billing-api"), None);
+        let sites = &model.session.sites.sites;
+        let billing = sites.iter().find(|site| site.name == "billing-api");
+        assert!(billing.is_some_and(|site| site.queue && site.schedule));
+        let failed = id("queue-billing-api");
+        assert_eq!(model.log_rows(failed).len(), 3);
+    }
 
     #[test]
     fn the_many_sites_demo_has_twelve_sites_and_four_php_versions() {

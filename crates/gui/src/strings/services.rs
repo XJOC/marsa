@@ -135,3 +135,5 @@ pub const PILL_STOPPED: &str = "Stopped";
 pub const PILL_STARTING: &str = "Starting";
 pub const PILL_STOPPING: &str = "Stopping";
 pub const PILL_FAILED: &str = "Failed";
+/// A site's worker whose switch is off.
+pub const PILL_OFF: &str = "Off";

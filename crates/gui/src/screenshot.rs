@@ -8,7 +8,7 @@
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size.
 //! `MARSA_GUI_ROUTE=home|sites|runtimes|runtimes:<runtime>|services|logs|logs:<service>|logs:site:<name>|mail|dumps|settings|site:<name>`
-//! opens that screen (`site:shop` is the page of the site `shop`; `logs:site:shop` is Logs on its own log; `runtimes:node` is Node.js chosen). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|logs-laravel|logs-laravel-errors|mail|mail-empty|mail-stopped|dumps|dumps-empty|dumps-off|dumps-busy|dumps-long|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! opens that screen (`site:shop` is the page of the site `shop`; `logs:site:shop` is Logs on its own log; `runtimes:node` is Node.js chosen). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|site-workers|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|logs-laravel|logs-laravel-errors|mail|mail-empty|mail-stopped|dumps|dumps-empty|dumps-off|dumps-busy|dumps-long|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! draws fixed fake data and starts no daemon (see `demo`).
 //! `MARSA_GUI_CLICK=x,y` clicks that point (in points, from the top left of
 //! the window) once the window has settled, so a menu is open in the picture

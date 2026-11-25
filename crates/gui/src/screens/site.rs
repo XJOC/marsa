@@ -1,8 +1,8 @@
 //! A site's own page (layout.md, Screens: Site page): the name and its
 //! address with "Open folder" and "Open in browser" (and "Open log" for a
 //! Laravel site), the site's PHP on the large version buttons with the
-//! reason, the facts (the HTTPS switch, the folder, the kind), and "Unlink
-//! this site…" at the end.
+//! reason, the workers of a Laravel site (`workers`), the facts (the HTTPS
+//! switch, the folder, the kind), and "Unlink this site…" at the end.
 //!
 //! It is two functions, like Home and Sites. [`view`] reads the [`Model`]
 //! and decides what the page says: pure, so the tests assert it without a
@@ -22,6 +22,7 @@ use eframe::egui::{CursorIcon, Sense, Ui, vec2};
 use marsa_core::runtimes::Runtime;
 use marsa_core::types::{Site, SiteKind};
 
+use self::workers::WorkersView;
 use super::lines;
 use super::sites::{self, Reason};
 use crate::model::{Action, Choice, LogSource, Model, Route};
@@ -32,6 +33,8 @@ use crate::theme::{Direction, Theme};
 use crate::widgets::{
     Button, Icon, QuietTone, Switch, Text, VersionPick, VersionPicker, fact_card,
 };
+
+mod workers;
 
 /// What the page says.
 #[derive(Debug, PartialEq)]
@@ -61,6 +64,8 @@ pub(crate) struct Found<'a> {
     /// "Unlinking shop.test…", while the daemon removes it.
     pub removing: Option<String>,
     pub php: PhpView<'a>,
+    /// The Workers card: a Laravel site's only.
+    pub workers: Option<WorkersView>,
     pub facts: Facts<'a>,
     pub unlink: Unlink<'a>,
     /// Why "Forget…" of the parked folder cannot be pressed now.
@@ -137,6 +142,7 @@ pub(crate) fn view<'a>(model: &'a Model, name: &'a str) -> SiteView<'a> {
         laravel: site.kind == SiteKind::Laravel,
         removing: sites::removing_line(model),
         php: php(model, site),
+        workers: workers::view(model, site),
         facts: facts(model, site),
         unlink: unlink_of(model, site),
         forget_off: (model.is_connected() && !model.can_remove())
@@ -211,6 +217,9 @@ fn found(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action>
         lines::mute(ui, theme, text);
     }
     php_section(ui, theme, page, actions);
+    if let Some(view) = &page.workers {
+        workers::show(ui, theme, view, actions);
+    }
     facts_card(ui, theme, page, actions);
     unlink(ui, theme, page, actions);
 }
@@ -712,6 +721,12 @@ mod tests {
         let (_, tree) = start(&model, "shop");
         assert!(tree.node_with_label(strings::OPEN_LOG).is_none());
         assert!(tree.node_with_label(strings::OPEN_FOLDER).is_some());
+        // Nor any workers.
+        assert!(found(&view(&model, "shop")).workers.is_none());
+        assert!(tree.node_with_text(strings::WORKERS).is_none());
+        let (_, tree) = start(&self::model(), "shop");
+        assert!(tree.node_with_text(strings::WORKERS).is_some());
+        assert!(tree.node_with_label(strings::WORKER_QUEUE).is_some());
     }
 
     #[test]
