@@ -1,10 +1,14 @@
 //! Logs (layout.md, Screens): the output of one program at a
 //! time, as a list of lines that fills the window. The source is the control
-//! at the end of the header (Caddy, and each PHP pool the daemon lists); under
-//! it, a field that filters the lines, a chip for each level, and Follow.
-//! An error line has a tinted row. The lines are the model's own copy of what
-//! the daemon sent (at most 5000 for each program), so nothing here asks the
-//! network.
+//! at the end of the header (Caddy, each PHP pool the daemon lists, then the
+//! own log of each Laravel site); under it, a field that filters the lines, a
+//! chip for each level, and Follow. An error line has a tinted row. The lines
+//! are the model's own copy of what the daemon sent (at most 5000 for each
+//! log), so nothing here asks the network.
+//!
+//! A Laravel site's log (layout.md, "Logs: a site's Laravel log") has a time
+//! column with each entry's stamp, and the lines of a stack trace are drawn
+//! under their entry's message.
 //!
 //! Like Home and Sites it is two functions. [`view`] reads the [`Model`] and
 //! decides what the screen says: pure, so the tests assert the filters
@@ -20,7 +24,7 @@
 use std::collections::VecDeque;
 
 use eframe::egui::{ScrollArea, Ui, Vec2, vec2};
-use marsa_core::types::{LogStream, ServiceId};
+use marsa_core::types::{LogStream, ServiceId, SiteKind};
 
 use super::lines::message;
 use crate::logline::{self, LogLevel};
@@ -38,7 +42,8 @@ const SEGMENTS: usize = 4;
 /// What Logs says.
 #[derive(Debug, PartialEq)]
 pub(crate) struct LogsView<'a> {
-    /// The log of each service the daemon lists, and the one on show.
+    /// The log of each service the daemon lists and of each Laravel site,
+    /// and the one on show.
     pub sources: Vec<SourceView>,
     /// The index in [`LogsView::sources`] of the log on show.
     pub current: usize,
@@ -73,6 +78,11 @@ pub(crate) enum Body<'a> {
     Offline,
     /// The program has written nothing yet: its name.
     Empty(String),
+    /// The Laravel site has no log file yet.
+    NoSiteLog,
+    /// The daemon does not send the site's log: a client error code, such
+    /// as `site_log_unsafe`.
+    Refused(&'a str),
     /// The filters leave no line.
     NoMatch,
     Lines(Lines<'a>),
@@ -83,6 +93,8 @@ pub(crate) enum Body<'a> {
 pub(crate) struct Lines<'a> {
     rows: &'a VecDeque<LogRow>,
     shown: Shown,
+    /// A Laravel site's log: each entry has a stamp, for the time column.
+    laravel: bool,
 }
 
 /// Which of the rows show. Nothing is filtered out most of the time, and
@@ -145,7 +157,19 @@ pub(crate) fn view<'a>(model: &'a Model, source: &LogSource) -> LogsView<'a> {
             name: model::service_name(id),
         })
         .collect();
-    // The log the user is on stays pickable if its service went away.
+    // Each Laravel site's own log, by name (the list is sorted).
+    let sites = model
+        .session
+        .sites
+        .sites
+        .iter()
+        .filter(|site| site.kind == SiteKind::Laravel)
+        .map(|site| SourceView {
+            source: LogSource::Site(site.name.clone()),
+            name: strings::site_log_source(&site.name),
+        });
+    sources.extend(sites);
+    // The log the user is on stays pickable if its service or site went away.
     if !sources.iter().any(|view| view.source == *source) {
         sources.push(SourceView {
             source: source.clone(),
@@ -179,12 +203,20 @@ fn source_name(source: &LogSource) -> String {
 }
 
 fn body<'a>(model: &'a Model, source: &LogSource) -> Body<'a> {
+    let site = match source {
+        LogSource::Site(site) => Some(site.as_str()),
+        LogSource::Caddy | LogSource::Service(_) => None,
+    };
+    let refused = site.and_then(|site| model.site_log_error(site));
+    if let Some(code) = refused.filter(|_| model.is_connected()) {
+        return Body::Refused(code);
+    }
     let rows = model.source_rows(source);
     if rows.is_empty() {
-        return if model.is_connected() {
-            Body::Empty(source_name(source))
-        } else {
-            Body::Offline
+        return match (model.is_connected(), site) {
+            (false, _) => Body::Offline,
+            (true, Some(_)) => Body::NoSiteLog,
+            (true, None) => Body::Empty(source_name(source)),
         };
     }
     let search = model.log_filter.trim();
@@ -199,7 +231,11 @@ fn body<'a>(model: &'a Model, source: &LogSource) -> Body<'a> {
             .collect();
         Shown::Some(indexes)
     };
-    let lines = Lines { rows, shown };
+    let lines = Lines {
+        rows,
+        shown,
+        laravel: site.is_some(),
+    };
     if lines.is_empty() {
         Body::NoMatch
     } else {
@@ -229,6 +265,8 @@ pub(crate) fn show(ui: &mut Ui, view: &LogsView<'_>, theme: &Theme) -> Vec<Actio
     match &view.body {
         Body::Offline => message(ui, theme, strings::LOGS_OFFLINE),
         Body::Empty(name) => message(ui, theme, &strings::log_empty(name)),
+        Body::NoSiteLog => message(ui, theme, strings::SITE_LOG_EMPTY),
+        Body::Refused(code) => message(ui, theme, &strings::error_text(code)),
         Body::NoMatch => message(ui, theme, strings::LOG_NO_MATCH),
         Body::Lines(lines) => list(ui, theme, view, lines, &mut actions),
     }
@@ -332,7 +370,8 @@ fn list(
         let spare = 0.0_f32.midpoint(room - height);
         ui.add_space(spare);
         // A row is as wide as the card, or as the widest line if that is wider.
-        let width = ui.available_width().max(width_for(ui, lines.widest()));
+        let needed = width_for(ui, lines.widest(), lines.laravel);
+        let width = ui.available_width().max(needed);
         let id = ui.make_persistent_id("log");
         // What the last frame saw: whether Follow was on, and how many
         // lines there were.
@@ -352,7 +391,7 @@ fn list(
         }
         let out = area.show_rows(ui, row, lines.len(), |ui, range| {
             for n in range {
-                entry(ui, lines.get(n), width);
+                entry(ui, lines.get(n), width, lines.laravel);
             }
         });
         // The user scrolled away from the end: Follow is off now, and its
@@ -374,7 +413,18 @@ fn list(
 
 /// One row, `width` wide: its level, and its message in the words of the
 /// program. A line the program wrote to its standard output is drawn quiet.
-fn entry(ui: &mut Ui, row: &LogRow, width: f32) {
+/// In a Laravel log, an entry's stamp goes to the time column, and a line of
+/// a stack trace goes under its entry's message.
+fn entry(ui: &mut Ui, row: &LogRow, width: f32, laravel: bool) {
+    if laravel {
+        let (stamp, message) = logline::laravel_shown(&row.text);
+        let shown = logline::clipped(message);
+        let entry = LogEntry::new(row.level, &shown, &row.text, width)
+            .stamp(stamp.unwrap_or_default())
+            .continuation(row.continuation);
+        ui.add(entry);
+        return;
+    }
     let message = logline::message(&row.text);
     let shown = logline::clipped(&message);
     let quiet = row.stream == LogStream::Stdout;

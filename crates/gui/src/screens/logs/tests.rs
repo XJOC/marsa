@@ -4,10 +4,10 @@ use eframe::egui::{
     self, Event, Modifiers, MouseWheelSource, MouseWheelUnit, Pos2, RawInput, Rect, Shape,
     TouchPhase, pos2,
 };
-use marsa_core::types::{LogLine, ServiceState, ServiceStatus};
+use marsa_core::types::{LogLine, ServiceState, ServiceStatus, Site, SiteList, SiteLogLine};
 
 use super::*;
-use crate::fixtures::connected;
+use crate::fixtures::{connected, site};
 use crate::model::Update;
 use crate::theme::{DARK, LIGHT};
 use crate::widgets::harness::{Harness, Tree};
@@ -737,4 +737,162 @@ fn a_standard_output_line_is_drawn_quiet_and_an_error_line_says_error() {
     );
     assert!(tree.node_with_text(&label).is_some(), "{label}");
     assert!(tree.node_with_text("Info: from stdout").is_some());
+}
+
+// -- a Laravel site's own log --
+
+const ENTRY_INFO: &str = "[2026-11-24 10:15:01] local.INFO: started";
+const ENTRY_ERROR: &str =
+    r#"[2026-11-24 10:15:03] local.ERROR: boom {"exception":"[object] (Error(code: 0): boom)"#;
+const TRACE: [&str; 3] = ["[stacktrace]", "#0 /app/Foo.php(12): bar()", r#""}"#];
+const ENTRY_WARN: &str = "[2026-11-24 10:15:04] local.WARNING: slow";
+
+fn shop() -> LogSource {
+    LogSource::Site("shop".into())
+}
+
+/// Connected, with Caddy and one PHP pool, the Laravel site `shop` and the
+/// plain PHP site `docs`, on `shop`'s log with these lines.
+fn site_log(texts: &[&str]) -> Model {
+    let mut model = connected();
+    model.update(Update::Services(vec![
+        service(ServiceId::Caddy),
+        service("php-fpm-8.4".parse::<ServiceId>().unwrap()),
+    ]));
+    let docs = Site {
+        kind: SiteKind::Php,
+        ..site("docs", None, None)
+    };
+    model.update(Update::Sites(SiteList {
+        sites: vec![site("shop", None, None), docs],
+        ..SiteList::default()
+    }));
+    model.apply_action(Action::Navigate(Route::Logs(shop())));
+    let lines = texts
+        .iter()
+        .zip(0..)
+        .map(|(text, seq)| SiteLogLine {
+            seq,
+            text: (*text).into(),
+        })
+        .collect();
+    model.update(Update::SiteLog {
+        site: "shop".into(),
+        lines,
+    });
+    model
+}
+
+/// An info entry, an error with its stack trace, and a warning.
+fn laravel_log() -> Model {
+    site_log(&[
+        ENTRY_INFO,
+        ENTRY_ERROR,
+        TRACE[0],
+        TRACE[1],
+        TRACE[2],
+        ENTRY_WARN,
+    ])
+}
+
+/// Frames of `shop`'s log with no input, so the layout settles.
+fn settle_on_shop(harness: &Harness, model: &Model) -> Tree {
+    let mut tree = None;
+    for _ in 0..3 {
+        tree = Some(harness.frame(input(Vec::new()), |ui| {
+            draw(ui, model, &shop());
+        }));
+    }
+    tree.expect("a frame")
+}
+
+#[test]
+fn each_laravel_site_has_its_own_log_after_the_services() {
+    let model = laravel_log();
+    let view = view(&model, &shop());
+    let names: Vec<_> = view.sources.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Caddy", "PHP-FPM 8.4", "Laravel · shop"]);
+    assert_eq!((view.current, &view.sources[2].source), (2, &shop()));
+    assert_eq!(texts(lines(&view)).len(), 6);
+    // Picked in the switch, it opens.
+    assert_eq!(
+        click(&model, "Laravel · shop"),
+        [Action::Navigate(Route::Logs(shop()))]
+    );
+}
+
+#[test]
+fn a_sites_log_with_no_lines_says_so_and_a_refused_one_says_why() {
+    let empty = site_log(&[]);
+    assert_eq!(view(&empty, &shop()).body, Body::NoSiteLog);
+    let tree = settle_on_shop(&Harness::new(egui::Theme::Light), &empty);
+    assert!(tree.node_with_text(strings::SITE_LOG_EMPTY).is_some());
+    assert!(tree.node_with_label("Follow").is_some());
+    let mut refused = site_log(&[ENTRY_INFO]);
+    refused.update(Update::SiteLogFailed {
+        site: "shop".into(),
+        code: "site_log_unsafe".into(),
+    });
+    assert_eq!(
+        view(&refused, &shop()).body,
+        Body::Refused("site_log_unsafe")
+    );
+    let tree = settle_on_shop(&Harness::new(egui::Theme::Light), &refused);
+    let why = strings::error_text("site_log_unsafe");
+    assert!(tree.node_with_text(&why).is_some(), "{why}");
+    // With no daemon the lines kept show, and the sidebar says the rest.
+    refused.update(Update::Reconnecting);
+    assert!(matches!(view(&refused, &shop()).body, Body::Lines(_)));
+    let mut offline = site_log(&[]);
+    offline.update(Update::Reconnecting);
+    assert_eq!(view(&offline, &shop()).body, Body::Offline);
+}
+
+#[test]
+fn the_error_filter_keeps_an_errors_stack_trace_with_it() {
+    let mut model = laravel_log();
+    model.apply_action(Action::ToggleLogLevel(LogLevel::Info));
+    model.apply_action(Action::ToggleLogLevel(LogLevel::Warning));
+    let view = view(&model, &shop());
+    assert_eq!(
+        texts(lines(&view)),
+        [ENTRY_ERROR, TRACE[0], TRACE[1], TRACE[2]]
+    );
+}
+
+#[test]
+fn an_entry_shows_its_stamp_and_message_and_its_trace_has_no_word_and_no_tint() {
+    let model = laravel_log();
+    let harness = Harness::new(egui::Theme::Light);
+    let tree = settle_on_shop(&harness, &model);
+    let message = r#"boom {"exception":"[object] (Error(code: 0): boom)"#;
+    let label = strings::log_entry_label(LogLevel::Error, message);
+    assert!(tree.node_with_text(&label).is_some(), "{label}");
+    // A line of the trace is heard as itself, with no level.
+    assert!(tree.node_with_text(TRACE[1]).is_some());
+    let wrong = strings::log_entry_label(LogLevel::Error, TRACE[1]);
+    assert!(tree.node_with_text(&wrong).is_none());
+    let shapes = harness.shapes(|ui| {
+        show(ui, &view(&model, &shop()), &LIGHT);
+    });
+    // One tinted row: the error's own, not its trace's.
+    let tints = shapes
+        .iter()
+        .filter(|shape| matches!(shape, Shape::Rect(rect) if rect.fill == LIGHT.color.error_bg))
+        .count();
+    assert_eq!(tints, 1);
+    // Each entry's stamp is in the time column, and in no message.
+    let drawn: Vec<String> = shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            Shape::Text(text) => Some(text.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect();
+    let stamps = drawn
+        .iter()
+        .filter(|text| text.starts_with("2026-11-24"))
+        .count();
+    assert_eq!(stamps, 3, "{drawn:?}");
+    assert!(drawn.iter().any(|text| text == "started"), "{drawn:?}");
 }

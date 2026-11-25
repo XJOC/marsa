@@ -54,6 +54,8 @@ pub fn php_for_site(site: &str) -> String {
 /// word `SITES` after an arrow icon.
 pub const OPEN_FOLDER: &str = "Open folder";
 pub const OPEN_IN_BROWSER: &str = "Open in browser";
+/// On a Laravel site's page: Logs, on the site's own log.
+pub const OPEN_LOG: &str = "Open log";
 /// The heading of the large version picker of the page, and its name for a
 /// screen reader.
 pub const PHP_FOR_THIS_SITE: &str = "PHP for this site";
