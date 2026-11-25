@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use eframe::egui;
 
-use crate::bridge;
+use crate::bridge::{self, Command};
 use crate::model::{Action, Connection, Effect, Model, Pick, Route, Update};
 use crate::prefs::{Prefs, WindowSize};
 use crate::review::ReviewAids;
@@ -101,7 +101,20 @@ impl App {
     /// Sends the next queued install once none of this window runs.
     fn send_next(&mut self) {
         if let Some(command) = self.model.next_command() {
-            self.bridge.send(command);
+            self.send(command);
+        }
+    }
+
+    /// Sends `command` to the bridge; in measurement mode, its made-up
+    /// source may answer it instead.
+    fn send(&mut self, command: Command) {
+        match self.aids.answer(&command) {
+            Some(answer) => {
+                if let Some(update) = answer {
+                    self.model.update(update);
+                }
+            }
+            None => self.bridge.send(command),
         }
     }
 
@@ -109,7 +122,7 @@ impl App {
     fn run(&mut self, ctx: &egui::Context, action: Action) {
         match self.model.apply_action(action) {
             Effect::None => {}
-            Effect::Send(command) => self.bridge.send(command),
+            Effect::Send(command) => self.send(command),
             Effect::OpenSite(name) => open_site(ctx, &self.model, &name),
             Effect::OpenFolder(folder) => {
                 if let Err(code) = opener::open_folder(&folder) {
@@ -208,7 +221,7 @@ impl App {
         };
         let effect = self.model.picked(pick, &folder);
         if let Effect::Send(command) = effect {
-            self.bridge.send(command);
+            self.send(command);
         }
     }
 }
@@ -245,6 +258,9 @@ impl eframe::App for App {
         let building = Instant::now();
         if self.aids.show_gallery(ui) {
             return;
+        }
+        if let Some(action) = self.aids.wanted() {
+            self.run(ui.ctx(), action);
         }
         if !self.aids.show_editor(ui) {
             let picking = self.picker.is_some();
@@ -342,6 +358,7 @@ mod tests {
             scroll: 0,
             sql: 0,
             typing: 0,
+            table: 0,
         };
         let measured = app(&ctx, dir.path(), Prefs::default()).measuring(plan);
         assert!(measured.model.is_connected());

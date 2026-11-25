@@ -82,7 +82,9 @@ impl ReviewAids {
     #[cfg(feature = "measure")]
     pub(crate) fn measuring(&mut self, model: &mut Model, plan: crate::measure::Plan) {
         crate::measure::fill(model, plan);
-        self.measure = Some(crate::measure::Run::new(plan));
+        let mut run = crate::measure::Run::new(plan);
+        run.open_table(model);
+        self.measure = Some(run);
     }
 
     #[cfg(all(test, feature = "measure"))]
@@ -129,6 +131,30 @@ impl ReviewAids {
         #[cfg(not(debug_assertions))]
         let _ = ui;
         false
+    }
+
+    /// The measurement's own answer to `command`, when it has one: the
+    /// window then sends nothing to the bridge.
+    pub(crate) fn answer(
+        &mut self,
+        command: &crate::bridge::Command,
+    ) -> Option<Option<crate::model::Update>> {
+        #[cfg(feature = "measure")]
+        if let Some(run) = &mut self.measure {
+            return run.answer(command);
+        }
+        #[cfg(not(feature = "measure"))]
+        let _ = command;
+        None
+    }
+
+    /// An action the measurement asks for now.
+    pub(crate) fn wanted(&mut self) -> Option<crate::model::Action> {
+        #[cfg(feature = "measure")]
+        if let Some(run) = &mut self.measure {
+            return run.wanted();
+        }
+        None
     }
 
     /// Draws the SQL editor in place of the screens when the measurement
