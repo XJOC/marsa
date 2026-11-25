@@ -30,6 +30,7 @@ mod runtimes;
 mod session;
 mod setup;
 mod sites;
+mod workers;
 
 pub use db_browser::{
     DbAction, DbBrowserState, DbScreen, DbTab, DbView, OpenTable, PaneValue, QueryRun, QueryState,
@@ -222,6 +223,7 @@ impl Model {
                     .set_sites(SitesNotice::Linked { name, folder });
             }
             Update::SitesFailed(code) => self.session.notices.set_sites(SitesNotice::Failed(code)),
+            Update::WorkerNotSaved { kind, site, code } => self.worker_not_saved(kind, site, code),
             Update::Runtimes(list) => self.set_runtimes(list),
             Update::RuntimesFailed(code) => {
                 self.session.notices.set_code(NoticeSource::Runtimes, code)
@@ -435,6 +437,7 @@ impl Model {
                 self.session.notices.clear(NoticeSource::Sites);
                 Some(Command::Secure { site, secure })
             }
+            Action::SetWorker { kind, site, on } => self.set_worker(kind, site, on),
             Action::AskUnlink(site) => {
                 self.ask_removal(Removal::Unlink { site });
                 None
