@@ -750,6 +750,13 @@ fn a_site_patch_tells_null_from_a_missing_field() {
         },
         json!({ "php": null, "proxy": null }),
     );
+    // A worker's switch sends its one field.
+    let worker = |kind, on| serde_json::to_value(SitePatch::worker(kind, on)).unwrap();
+    assert_eq!(worker(WorkerKind::Queue, true), json!({ "queue": true }));
+    assert_eq!(
+        worker(WorkerKind::Schedule, false),
+        json!({ "schedule": false })
+    );
     // `null` for `secure` keeps it, like a missing field.
     let patch: SitePatch = serde_json::from_value(json!({ "secure": null })).unwrap();
     assert_eq!(patch, SitePatch::default());

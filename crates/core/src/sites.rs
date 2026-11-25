@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::SitesConfig;
 use crate::resolver::{Resolution, Source};
-use crate::types::{SiteList, SkippedFolder};
+use crate::types::{SiteList, SkippedFolder, WorkerKind};
 
 /// The top-level domain of every site: `shop` is served at `https://shop.test`.
 pub const TLD: &str = "test";
@@ -69,6 +69,14 @@ impl Site {
     /// The host name: `shop.test`.
     pub fn host(&self) -> String {
         format!("{}.{TLD}", self.name)
+    }
+
+    /// Whether the site's setting asks for worker `kind`.
+    pub fn wants(&self, kind: WorkerKind) -> bool {
+        match kind {
+            WorkerKind::Queue => self.queue,
+            WorkerKind::Schedule => self.schedule,
+        }
     }
 }
 

@@ -48,7 +48,7 @@ use crate::types::{
     AutostartRequest, AutostartState, DefaultRequest, DefaultVersion, DoctorReport, DumpList,
     DumpsCapture, ErrorBody, Event, Health, HostsStatus, InstallAccepted, InstallRequest,
     LinkRequest, LogLine, MailList, MailText, ParkRequest, RuntimeList, ServiceStatus, SiteList,
-    SiteLog, SiteLogLine, SitePatch, XdebugRequest, XdebugState,
+    SiteLog, SiteLogLine, SitePatch, WorkerKind, XdebugRequest, XdebugState,
 };
 use lifecycle::lock_is_held;
 
@@ -271,6 +271,25 @@ impl DaemonClient {
     ) -> Result<SiteList, ClientError> {
         self.call_with(Method::PATCH, &["v1", "sites", name], patch)
             .await
+    }
+
+    /// `PATCH /v1/sites/{name}` with `{"queue": on}` or `{"schedule": on}`.
+    /// Returns once the setting is saved: the daemon starts or stops the
+    /// worker after, and `GET /v1/services` shows it. The list after the
+    /// change.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; the daemon's `site_not_found` (404), and
+    /// `site_not_laravel` (409) to turn a worker on for a site that is not
+    /// Laravel.
+    pub async fn set_worker(
+        &self,
+        name: &str,
+        kind: WorkerKind,
+        on: bool,
+    ) -> Result<SiteList, ClientError> {
+        self.update_site(name, &SitePatch::worker(kind, on)).await
     }
 
     /// `DELETE /v1/sites/{name}`: the linked site `name` is no longer served,

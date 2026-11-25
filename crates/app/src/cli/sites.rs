@@ -505,7 +505,7 @@ fn link_name(name: Option<&str>, folder: &Path) -> Result<String, Failure> {
 
 /// `name` if it is a valid site name. No site has any other name, so the
 /// daemon need not be asked.
-fn checked(name: &str) -> Result<String, Failure> {
+pub(super) fn checked(name: &str) -> Result<String, Failure> {
     match sites::validate_name(name) {
         Ok(()) => Ok(name.to_owned()),
         Err(err) => {
@@ -520,7 +520,7 @@ fn checked(name: &str) -> Result<String, Failure> {
 }
 
 /// A failure found before any call.
-fn local(code: &str, details: &Details<'_>) -> Failure {
+pub(super) fn local(code: &str, details: &Details<'_>) -> Failure {
     Failure {
         code: code.to_owned().into(),
         message: strings::message(code, details),

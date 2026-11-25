@@ -22,7 +22,9 @@ use marsa::cli::setup;
 use marsa::cli::sites::{self, SitesCommand};
 use marsa::cli::uninstall::{self, UninstallArgs};
 use marsa::cli::uninstall_all::{self, UninstallAllArgs};
+use marsa::cli::workers::{self, WorkerArgs};
 use marsa::cli::xdebug::{self, XdebugArgs};
+use marsa_core::types::WorkerKind;
 
 /// Local development runtimes and sites.
 #[derive(Debug, Parser)]
@@ -102,6 +104,12 @@ enum Command {
     /// Load Xdebug in every installed PHP, or in none: on or off. Without on
     /// or off, show whether PHP loads it, and which versions.
     Xdebug(XdebugArgs),
+    /// Run "php artisan queue:work" for a Laravel site, with the site's PHP:
+    /// on, off, or status.
+    Queue(WorkerArgs),
+    /// Run "php artisan schedule:work" for a Laravel site, with the site's
+    /// PHP: on, off, or status.
+    Schedule(WorkerArgs),
 }
 
 /// `marsa uninstall`: one installed version (`<TOOL> <VERSION>`),
@@ -176,6 +184,8 @@ async fn main() -> ExitCode {
         Command::Autostart(args) => autostart::run(args, &data_dir).await,
         Command::Doctor => doctor::run(&data_dir).await,
         Command::Xdebug(args) => xdebug::run(args, &data_dir).await,
+        Command::Queue(args) => workers::run(WorkerKind::Queue, args, &data_dir).await,
+        Command::Schedule(args) => workers::run(WorkerKind::Schedule, args, &data_dir).await,
     };
     result.unwrap_or_else(|failure| failure.report())
 }
@@ -479,6 +489,53 @@ mod tests {
             &["autostart", "ON"],
             &["autostart", "on", "off"],
             &["autostart", "--on"],
+        ] {
+            let err = parse(args).expect_err("invalid arguments");
+            assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());
+        }
+    }
+
+    #[test]
+    fn queue_and_schedule_take_on_off_or_status() {
+        use marsa::cli::workers::WorkerCommand;
+
+        let site = || "shop".to_owned();
+        for (args, queue, want) in [
+            (
+                &["queue", "on", "shop"][..],
+                true,
+                WorkerCommand::On { site: site() },
+            ),
+            (
+                &["schedule", "off", "shop"],
+                false,
+                WorkerCommand::Off { site: site() },
+            ),
+            (
+                &["queue", "status"],
+                true,
+                WorkerCommand::Status { site: None },
+            ),
+            (
+                &["--data-dir", "/x", "schedule", "status", "shop"],
+                false,
+                WorkerCommand::Status { site: Some(site()) },
+            ),
+        ] {
+            match (parse(args).expect("valid").command, queue) {
+                (Command::Queue(got), true) | (Command::Schedule(got), false) => {
+                    assert_eq!(got.command, want, "{args:?}");
+                }
+                (other, _) => panic!("not the worker command: {other:?}"),
+            }
+        }
+        for args in [
+            &["queue"][..],
+            &["queue", "on"],
+            &["schedule", "off"],
+            &["queue", "start", "shop"],
+            &["queue", "on", "shop", "blog"],
+            &["schedule", "status", "shop", "blog"],
         ] {
             let err = parse(args).expect_err("invalid arguments");
             assert_eq!(err.exit_code(), 2, "{args:?}: {:?}", err.kind());

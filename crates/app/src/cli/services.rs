@@ -111,18 +111,7 @@ pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
         return format!("{}\n", strings::NO_SERVICES);
     }
     let mut text = table(services);
-    for status in services {
-        if let ServiceState::Failed { code } = &status.state {
-            let id = status.id.to_string();
-            let failure = Failure::new(code, data_dir, Some(&id));
-            text.push_str(&strings::service_failed(
-                &id,
-                &failure.message,
-                &failure.code,
-            ));
-            text.push('\n');
-        }
-    }
+    text.push_str(&failed_lines(services, data_dir));
     let global = config::load_global(&ConfigPaths::in_dir(data_dir).global).ok();
     for kind in ServerKind::ALL {
         let running = services.iter().any(|status| {
@@ -149,6 +138,28 @@ pub fn render(services: &[ServiceStatus], data_dir: &Path) -> String {
     text
 }
 
+/// One line per failed service in `services`, each ending in a line break,
+/// that says why it failed.
+pub(super) fn failed_lines<'a>(
+    services: impl IntoIterator<Item = &'a ServiceStatus>,
+    data_dir: &Path,
+) -> String {
+    let mut text = String::new();
+    for status in services {
+        if let ServiceState::Failed { code } = &status.state {
+            let id = status.id.to_string();
+            let failure = Failure::new(code, data_dir, Some(&id));
+            text.push_str(&strings::service_failed(
+                &id,
+                &failure.message,
+                &failure.code,
+            ));
+            text.push('\n');
+        }
+    }
+    text
+}
+
 /// One row per service, with a title row. Each column is as wide as its
 /// widest cell, and two spaces apart.
 fn table(services: &[ServiceStatus]) -> String {
@@ -170,6 +181,7 @@ fn table(services: &[ServiceStatus]) -> String {
 mod tests {
     use super::*;
     use marsa_core::data_dir::DataDir;
+    use marsa_core::types::{SiteKey, WorkerKind};
 
     fn status(
         id: ServiceId,
@@ -202,6 +214,27 @@ mod tests {
             "SERVICE  STATE    PID   RESTARTS\n\
              caddy    running  4242  0\n\
              valkey   stopped  -     12\n"
+        );
+    }
+
+    /// The site pages show the workers, and this table lists them too.
+    #[test]
+    fn the_table_lists_a_sites_workers() {
+        let worker = |kind| ServiceId::Worker(kind, SiteKey::new("shop").unwrap());
+        let services = [
+            status(worker(WorkerKind::Queue), ServiceState::Running, Some(8), 0),
+            status(
+                worker(WorkerKind::Schedule),
+                ServiceState::Starting,
+                None,
+                0,
+            ),
+        ];
+        assert_eq!(
+            render(&services, Path::new("/data")),
+            "SERVICE        STATE     PID  RESTARTS\n\
+             queue-shop     running   8    0\n\
+             schedule-shop  starting  -    0\n"
         );
     }
 
