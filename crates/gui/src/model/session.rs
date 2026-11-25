@@ -122,6 +122,9 @@ pub struct Session {
     pub db: DbBrowserState,
     /// The dumps `marsad` caught, as last read.
     pub dumps: DumpsState,
+    /// The workers whose switch sent a change, by id, with the setting it
+    /// asked for: until the site list has it, the switch waits.
+    pub(super) workers_asked: BTreeMap<ServiceId, bool>,
 }
 
 impl Model {
@@ -177,5 +180,6 @@ impl Model {
         self.session.mail = MailState::default();
         self.session.db = DbBrowserState::default();
         self.session.dumps = DumpsState::default();
+        self.session.workers_asked.clear();
     }
 }

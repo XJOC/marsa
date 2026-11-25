@@ -21,7 +21,7 @@ use eframe::egui;
 use marsa_core::client::{self, ClientError, DaemonClient, StreamItem};
 use marsa_core::types::{
     Event, HostsStatus, InstallProgress, InstallUpdate, ServiceAction, ServiceId, ServiceStatus,
-    SiteList, SitePatch,
+    SiteKey, SiteList, SitePatch, WorkerKind,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -48,6 +48,12 @@ pub enum Command {
     Link { name: String, folder: PathBuf },
     /// A site's HTTPS switch.
     Secure { site: String, secure: bool },
+    /// A worker's switch on a Laravel site's page.
+    SetWorker {
+        kind: WorkerKind,
+        site: SiteKey,
+        on: bool,
+    },
     /// A default version or a site's PHP version, picked in a list.
     Save(Change),
     /// An Install button, or the first-run panel.
@@ -537,6 +543,20 @@ fn run_command(
                 result
                     .err()
                     .map(|err| sites_failed(&format!("cannot change HTTPS for {site}"), &err))
+            }
+            Command::SetWorker { kind, site, on } => {
+                match client.set_worker(site.as_str(), kind, on).await {
+                    Ok(_) => {
+                        tracing::info!(site = %site, worker = kind.prefix(), on, "worker setting changed");
+                        None
+                    }
+                    Err(err) => {
+                        let (worker, code) = (kind.prefix(), err.code());
+                        tracing::warn!(code, error = %err, site = %site, worker, "cannot change the worker");
+                        let code = code.to_owned();
+                        Some(Update::WorkerNotSaved { kind, site, code })
+                    }
+                }
             }
             Command::Save(change) => Some(save(&client, change).await),
             Command::Install(job) => Some(install(&client, job).await),

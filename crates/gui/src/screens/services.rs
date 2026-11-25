@@ -78,15 +78,17 @@ pub(crate) fn view(model: &Model) -> ServicesView {
     if !model.is_connected() {
         return ServicesView::Offline;
     }
-    if model.session.services.is_empty() {
-        return ServicesView::Empty;
-    }
+    // A site's workers show on its page, not here.
     let rows: Vec<_> = model
         .session
         .services
         .iter()
+        .filter(|service| !service.id.is_worker())
         .map(|service| row(model, service))
         .collect();
+    if rows.is_empty() {
+        return ServicesView::Empty;
+    }
     let pools = model.session.services.iter().any(|s| s.id.is_pool());
     ServicesView::Rows { rows, pools }
 }
@@ -257,7 +259,7 @@ mod tests {
     use std::path::PathBuf;
 
     use eframe::egui::{self, Pos2, pos2};
-    use marsa_core::types::{LogLine, LogStream, Site, SiteKind, SiteList};
+    use marsa_core::types::{LogLine, LogStream, Site, SiteKey, SiteKind, SiteList, WorkerKind};
 
     use super::*;
     use crate::fixtures::connected;
@@ -456,6 +458,25 @@ mod tests {
             let row = only_with(ServiceId::Caddy, state.clone(), true);
             assert!(!row.actions.contains(&RowButton::ShowLog), "{state:?}");
         }
+    }
+
+    /// A site's workers show on its page and in Logs, not here.
+    #[test]
+    fn a_sites_workers_are_not_listed() {
+        let worker = |kind| ServiceId::Worker(kind, SiteKey::new("shop").unwrap());
+        let mut model = model(vec![
+            service(ServiceId::Caddy, ServiceState::Running),
+            service(worker(WorkerKind::Queue), ServiceState::Running),
+            service(worker(WorkerKind::Schedule), ServiceState::Stopped),
+        ]);
+        let ids: Vec<_> = rows(&view(&model)).iter().map(|row| row.id).collect();
+        assert_eq!(ids, [ServiceId::Caddy]);
+        // Workers alone: the screen has no program to list.
+        model.update(Update::Services(vec![service(
+            worker(WorkerKind::Queue),
+            ServiceState::Running,
+        )]));
+        assert_eq!(view(&model), ServicesView::Empty);
     }
 
     #[test]

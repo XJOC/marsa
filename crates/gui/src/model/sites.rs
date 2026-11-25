@@ -220,5 +220,6 @@ impl Model {
         list.sites.sort_by(|a, b| a.name.cmp(&b.name));
         self.session.sites = list;
         self.leave_gone_site_log();
+        self.settle_workers();
     }
 }
