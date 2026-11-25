@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use marsa_core::types::DbServer;
 
-use super::sqlite;
+use super::{servers, sqlite};
 use crate::daemon::http::test_router::TestRouter;
 use crate::daemon::state::Daemon;
 
@@ -854,4 +854,12 @@ async fn after_close_the_sqlite_file_can_be_deleted() {
         }
     }
     assert!(!file.exists());
+}
+
+#[test]
+fn a_server_connection_keeps_few_prepared_statements() {
+    // The driver's options say their cache size only in their `Debug`.
+    let kept = format!("statement_cache_capacity: {}", servers::STATEMENT_CACHE);
+    assert!(format!("{:?}", servers::mysql_options(3306, Some("shop"))).contains(&kept));
+    assert!(format!("{:?}", servers::pg_options(5432, None)).contains(&kept));
 }
