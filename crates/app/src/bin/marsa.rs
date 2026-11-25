@@ -9,6 +9,7 @@ use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use marsa::cli::Tool;
 use marsa::cli::autostart::{self, AutostartArgs};
 use marsa::cli::daemon::{self, DaemonCommand};
+use marsa::cli::db::{self, DbArgs};
 use marsa::cli::default_version::{self, UseArgs};
 use marsa::cli::doctor;
 use marsa::cli::dumps::{self, DumpsArgs};
@@ -70,6 +71,10 @@ enum Command {
     /// List the mail your projects sent, which Mailpit kept on this
     /// computer; show one with "show <ID>", or delete all with "clear".
     Mail(MailArgs),
+    /// Browse the databases of Marsa's servers and the sites' SQLite files,
+    /// read-only: list them, their tables, a page of rows, or run one
+    /// statement.
+    Db(DbArgs),
     /// Show what dump() printed in your PHP sites, with its file, line, and
     /// URL. With "--follow", new dumps as they come; "clear" deletes them;
     /// "off" and "on" switch the capture.
@@ -164,6 +169,7 @@ async fn main() -> ExitCode {
         Command::Services(args) => services::run(args, &data_dir).await,
         Command::Logs(args) => logs::run(args, &data_dir).await,
         Command::Mail(args) => mail::run(args, &data_dir).await,
+        Command::Db(args) => db::run(args, &data_dir).await,
         Command::Dumps(args) => dumps::run(args, &data_dir).await,
         Command::Sites(command) => sites::run(command, &data_dir).await,
         Command::Setup => setup::run(&data_dir).await,

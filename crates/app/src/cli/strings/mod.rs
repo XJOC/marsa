@@ -5,6 +5,7 @@
 //! `Display` text goes to the log only. To add a code, add it to
 //! `marsa_core::codes` and one arm to `known`: a test fails until both exist.
 
+mod db;
 mod doctor;
 mod dumps;
 mod errors;
@@ -17,6 +18,7 @@ mod sites;
 #[cfg(test)]
 mod tests;
 
+pub use db::*;
 pub use doctor::*;
 pub use dumps::*;
 use errors::*;

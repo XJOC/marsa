@@ -7,6 +7,7 @@
 
 pub mod autostart;
 pub mod daemon;
+pub mod db;
 pub mod default_version;
 pub mod doctor;
 pub mod dumps;
