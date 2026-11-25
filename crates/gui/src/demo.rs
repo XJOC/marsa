@@ -23,6 +23,7 @@ use crate::model::{
     Action, Autostart, InstallJob, LinkForm, LogLevel, Model, Removal, SitesNotice, Update, apply,
 };
 
+mod databases;
 mod dumps;
 mod mail;
 
@@ -94,6 +95,10 @@ pub enum Demo {
     MailStopped,
     /// `Mail` with the confirmation of "Delete every mail?" open.
     ConfirmDeleteMail,
+    /// The same as `Ok`, on Databases: MySQL's `shop` and its tables.
+    Databases,
+    /// `Databases` with MySQL stopped.
+    DatabasesStopped,
     /// The same as `Ok`, with six dumps, four of them new, the newest shown.
     Dumps,
     /// `Dumps` with the capture on and nothing caught yet.
@@ -144,6 +149,8 @@ fn parse(name: &str) -> Option<Demo> {
         "mail" => Demo::Mail,
         "mail-empty" => Demo::MailEmpty,
         "mail-stopped" => Demo::MailStopped,
+        "databases" => Demo::Databases,
+        "databases-stopped" => Demo::DatabasesStopped,
         "confirm-delete-mail" => Demo::ConfirmDeleteMail,
         "dumps" => Demo::Dumps,
         "dumps-empty" => Demo::DumpsEmpty,
@@ -240,6 +247,9 @@ pub fn fill(model: &mut Model, demo: Demo) {
         Demo::Mail | Demo::MailEmpty | Demo::MailStopped | Demo::ConfirmDeleteMail
     ) {
         mail::fill(model, demo, php);
+    }
+    if matches!(demo, Demo::Databases | Demo::DatabasesStopped) {
+        databases::fill(model, demo);
     }
     if matches!(
         demo,

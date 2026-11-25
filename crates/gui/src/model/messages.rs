@@ -7,6 +7,8 @@ use super::*;
 /// What the bridge sends to the window.
 #[derive(Debug)]
 pub enum Update {
+    /// An answer of the Databases screen's reads.
+    Db(crate::bridge::DbUpdate),
     /// Connected. A new session: the daemon may have restarted, so the old
     /// table and log are dropped.
     Connected(Health),
@@ -123,6 +125,12 @@ pub enum Update {
 /// posted to a controller.]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    /// A source of the Databases menu: its tables are read.
+    ChooseDbSource(marsa_core::types::DbSource),
+    /// "Find a table" changed: the list is filtered, with no read.
+    FilterDbTables(String),
+    /// "Try again" on Databases: what can be opened is read again.
+    ReadDbSources,
     /// A sidebar item, or the status at its bottom.
     Navigate(Route),
     /// The fold button of the sidebar: hide or show the labels.

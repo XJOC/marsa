@@ -395,6 +395,7 @@ fn parse_route(name: &str) -> Option<Route> {
         "logs" => Route::Logs(LogSource::Caddy),
         "mail" => Route::Mail,
         "dumps" => Route::Dumps,
+        "databases" => Route::Databases,
         "settings" => Route::Settings,
         _ => return None,
     })
