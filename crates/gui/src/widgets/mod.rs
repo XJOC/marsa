@@ -28,6 +28,7 @@ pub mod chip;
 pub mod dialog;
 pub mod facts;
 pub mod field;
+pub mod grid;
 // Debug builds only: the page the design review reads. A
 // release build has no gallery and reads no extra environment variable.
 #[cfg(debug_assertions)]
@@ -48,6 +49,7 @@ pub mod step;
 pub mod switch;
 pub mod table;
 pub mod tabs;
+pub mod tag;
 pub mod text;
 pub mod tile;
 pub mod version;
