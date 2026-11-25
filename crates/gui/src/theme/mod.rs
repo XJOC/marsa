@@ -301,6 +301,15 @@ pub struct Size {
     pub badge: f32,
     /// The header row of a table: 34 (components.md, Tables and lists).
     pub table_header: f32,
+    /// `size.grid.column`: a data grid column is 64 to 320 wide.
+    pub grid_column_min: f32,
+    pub grid_column_max: f32,
+    /// `size.grid.footer`: the page bar under a data grid, 40.
+    pub grid_footer: f32,
+    /// `size.tag`: a tag (NULL, Read-only, key) is 18 high in a grid cell,
+    /// 22 elsewhere.
+    pub tag_in_grid: f32,
+    pub tag: f32,
     /// The height of a tab strip, with its 1 px line: 38 (components.md,
     /// Tabs).
     pub tab: f32,
@@ -494,6 +503,11 @@ pub const SIZE: Size = Size {
     switch_inset: 3.0,
     badge: 26.0,
     table_header: 34.0,
+    grid_column_min: 64.0,
+    grid_column_max: 320.0,
+    grid_footer: 40.0,
+    tag_in_grid: 18.0,
+    tag: 22.0,
     tab: 38.0,
     tab_bar: 2.0,
     dialog_width: 440.0,

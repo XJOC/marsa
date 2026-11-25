@@ -1,12 +1,14 @@
 //! The tables page of the gallery.
 
-use eframe::egui::Ui;
+use eframe::egui::{Ui, vec2};
+use marsa_core::types::{DbCell, DbColumnKind, DbPageColumn};
 
 use crate::strings;
 use crate::theme::{Section, Theme};
 use crate::widgets::badge::RowBadge;
 use crate::widgets::button::Button;
 use crate::widgets::facts::fact_card;
+use crate::widgets::grid::{Grid, GridEvent, column_widths};
 use crate::widgets::icons::{Glyph, Icon};
 use crate::widgets::switch::Switch;
 use crate::widgets::table::{RowHeight, Table, TableColumn, empty_state};
@@ -124,6 +126,9 @@ pub(super) fn tables_page(ui: &mut Ui, theme: &Theme) {
         live.row = output.clicked;
     }
 
+    heading(ui, theme, label::GRID);
+    grid(ui, theme, &mut live);
+
     heading(ui, theme, label::EMPTY);
     empty_state(ui, "No sites yet.", "Add site…");
 
@@ -146,4 +151,60 @@ pub(super) fn tables_page(ui: &mut Ui, theme: &Theme) {
         });
     });
     ui.ctx().data_mut(|data| data.insert_temp(id, live));
+}
+
+/// The rows the sample grid shows at once.
+const GRID_ROWS: usize = 8;
+
+/// A page of 200 sample rows, in a box `GRID_ROWS` high.
+fn grid(ui: &mut Ui, theme: &Theme, live: &mut Live) {
+    let column = |name: &str, kind| DbPageColumn {
+        name: name.into(),
+        kind,
+    };
+    let columns = [
+        column("id", DbColumnKind::Number),
+        column("email", DbColumnKind::Text),
+        column("created_at", DbColumnKind::Time),
+        column("avatar", DbColumnKind::Binary),
+        column("deleted_at", DbColumnKind::Time),
+    ];
+    let rows: Vec<Vec<DbCell>> = (1..=200_u64)
+        .map(|id| {
+            vec![
+                DbCell::Text(id.to_string()),
+                DbCell::Text(format!("user{id}@example.test")),
+                DbCell::Text(format!("2026-11-{:02} 09:30:00", id % 28 + 1)),
+                DbCell::Binary { bytes: id * 731 },
+                if id % 3 == 0 {
+                    DbCell::Text("2026-11-24 18:00:00".into())
+                } else {
+                    DbCell::Null
+                },
+            ]
+        })
+        .collect();
+    let widths = column_widths(ui, &columns, &rows);
+    let height = theme.size.table_header + GRID_ROWS as f32 * theme.size.row_dense;
+    let size = vec2(ui.available_width(), height);
+    let events = ui
+        .allocate_ui(size, |ui| {
+            Grid::new("gallery_data_grid", &columns, &rows, &widths, live.cell)
+                .sortable(live.sorted)
+                .show(ui)
+        })
+        .inner;
+    for event in events {
+        match event {
+            GridEvent::Current { row, column } => live.cell = (row, column),
+            GridEvent::Sort(column) => {
+                live.sorted = match live.sorted {
+                    Some((sorted, false)) if sorted == column => Some((column, true)),
+                    Some((sorted, true)) if sorted == column => None,
+                    _ => Some((column, false)),
+                };
+            }
+            _ => {}
+        }
+    }
 }
