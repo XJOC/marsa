@@ -278,6 +278,20 @@ impl LaravelReader {
     }
 }
 
+/// How many columns the time column of a log with its own stamps takes: a
+/// Laravel stamp, `2026-11-24 10:15:03`.
+pub const STAMP_COLUMNS: usize = 19;
+
+/// `stamp` cut at [`STAMP_COLUMNS`] characters, for the time column. A
+/// project that writes a longer stamp (`2026-11-24T10:15:03.123456+00:00`)
+/// keeps its date and time; the tooltip has the whole line.
+pub fn stamp_clipped(stamp: &str) -> &str {
+    stamp
+        .char_indices()
+        .nth(STAMP_COLUMNS)
+        .map_or(stamp, |(at, _)| &stamp[..at])
+}
+
 /// What a row of a Laravel log shows: the stamp of an entry, for the time
 /// column, and its message; or no stamp and the whole line, for any other
 /// line.
@@ -520,6 +534,20 @@ mod tests {
             );
             assert_eq!(laravel_shown(text), (Some("2026-11-24 10:15:03"), ""));
         }
+    }
+
+    #[test]
+    fn a_stamp_is_cut_at_the_time_column() {
+        assert_eq!(stamp_clipped("2026-11-24 10:15:03"), "2026-11-24 10:15:03");
+        assert_eq!(
+            stamp_clipped("2026-11-24T10:15:03.123456+00:00"),
+            "2026-11-24T10:15:03"
+        );
+        assert_eq!(stamp_clipped("1"), "1");
+        assert_eq!(stamp_clipped(""), "");
+        // Cut on a character, never inside one.
+        let wide = "٢".repeat(STAMP_COLUMNS + 3);
+        assert_eq!(stamp_clipped(&wide).chars().count(), STAMP_COLUMNS);
     }
 
     #[test]

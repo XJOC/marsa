@@ -7,8 +7,8 @@
 //! uncompressed 24-bit BMP, then closes the window.
 //! `MARSA_GUI_THEME=light|dark` draws that theme instead of the system's.
 //! `MARSA_GUI_SIZE=900x720` opens the window at that size.
-//! `MARSA_GUI_ROUTE=home|sites|runtimes|runtimes:<runtime>|services|logs|logs:<service>|mail|dumps|settings|site:<name>`
-//! opens that screen (`site:shop` is the page of the site `shop`; `runtimes:node` is Node.js chosen). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|mail|mail-empty|mail-stopped|dumps|dumps-empty|dumps-off|dumps-busy|dumps-long|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! `MARSA_GUI_ROUTE=home|sites|runtimes|runtimes:<runtime>|services|logs|logs:<service>|logs:site:<name>|mail|dumps|settings|site:<name>`
+//! opens that screen (`site:shop` is the page of the site `shop`; `logs:site:shop` is Logs on its own log; `runtimes:node` is Node.js chosen). `MARSA_GUI_DEMO=ok|caddy-stopped|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|logs-laravel|logs-laravel-errors|mail|mail-empty|mail-stopped|dumps|dumps-empty|dumps-off|dumps-busy|dumps-long|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! draws fixed fake data and starts no daemon (see `demo`).
 //! `MARSA_GUI_CLICK=x,y` clicks that point (in points, from the top left of
 //! the window) once the window has settled, so a menu is open in the picture
@@ -380,6 +380,10 @@ fn parse_route(name: &str) -> Option<Route> {
     if let Some(site) = name.strip_prefix("site:") {
         return (!site.is_empty()).then(|| Route::Site(site.to_owned()));
     }
+    if let Some(site) = name.strip_prefix("logs:site:") {
+        let log = LogSource::Site(site.to_owned());
+        return (!site.is_empty()).then_some(Route::Logs(log));
+    }
     if let Some(id) = name.strip_prefix("logs:") {
         return id.parse().ok().map(|id| Route::Logs(LogSource::of(id)));
     }
@@ -478,6 +482,11 @@ mod tests {
             Some(Route::Logs(LogSource::Caddy))
         );
         assert_eq!(parse_route("logs:"), None);
+        assert_eq!(
+            parse_route("logs:site:shop"),
+            Some(Route::Logs(LogSource::Site("shop".into())))
+        );
+        assert_eq!(parse_route("logs:site:"), None);
         assert_eq!(parse_route("mail"), Some(Route::Mail));
         assert_eq!(parse_route("dumps"), Some(Route::Dumps));
         assert_eq!(parse_route("queues"), None);
