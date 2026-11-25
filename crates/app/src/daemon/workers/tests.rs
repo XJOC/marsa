@@ -386,8 +386,22 @@ mod real {
         assert!(daemon.workers().statuses().is_empty());
         manager.sync(&daemon, &[on]).await;
         let back = wait_for(&daemon, running).await;
-        let after = lock(&daemon.workers().find(queue()).unwrap()).logs.recent();
-        assert!(after.iter().any(|line| line.seq > last));
+        // The new run's first line comes a moment after `running`.
+        let runtime = daemon.workers().find(queue()).unwrap();
+        let newer = || {
+            lock(&runtime)
+                .logs
+                .recent()
+                .iter()
+                .any(|line| line.seq > last)
+        };
+        let waited = tokio::time::timeout(WAIT, async {
+            while !newer() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        assert!(waited.await.is_ok(), "no line after seq {last}");
+        let after = lock(&runtime).logs.recent();
         assert!(after.windows(2).all(|pair| pair[0].seq < pair[1].seq));
         daemon.stop_procs(WAIT).await;
         gone(back.pid.unwrap()).await;
