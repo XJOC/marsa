@@ -183,24 +183,52 @@ async fn ping(conn: &mut Conn) -> bool {
 /// What the session settings must read back as, after they are set.
 const LIMIT_MS: u128 = REQUEST_LIMIT.as_millis();
 
+/// How many prepared statements a server connection keeps. The driver
+/// keeps 100 by default, each on the server and in `marsad`. The browser
+/// repeats only its few catalog statements; a count or a value is prepared
+/// per table, so past this many the oldest one is closed.
+pub(super) const STATEMENT_CACHE: usize = 16;
+
+pub(super) fn mysql_options(port: u16, database: Option<&str>) -> MySqlConnectOptions {
+    // No `sql_mode` or time zone of the driver's own: the user's SQL runs as
+    // the server's defaults say.
+    let options = MySqlConnectOptions::new()
+        .host("127.0.0.1")
+        .port(port)
+        .username(USER)
+        .ssl_mode(MySqlSslMode::Disabled)
+        .pipes_as_concat(false)
+        .no_engine_substitution(false)
+        .timezone(None)
+        .statement_cache_capacity(STATEMENT_CACHE)
+        .disable_statement_logging();
+    match database {
+        Some(database) => options.database(database),
+        None => options,
+    }
+}
+
+pub(super) fn pg_options(port: u16, database: Option<&str>) -> PgConnectOptions {
+    PgConnectOptions::new_without_pgpass()
+        .host("127.0.0.1")
+        .hostaddr(Ipv4Addr::LOCALHOST)
+        .port(port)
+        .username(USER)
+        .password("")
+        .database(database.unwrap_or(POSTGRES_HOME))
+        .ssl_mode(PgSslMode::Disable)
+        .application_name("marsa")
+        .statement_cache_capacity(STATEMENT_CACHE)
+        .disable_statement_logging()
+}
+
 async fn connect(server: DbServer, port: u16, database: Option<&str>) -> Result<Conn, HttpError> {
     match server {
         DbServer::Mysql => {
-            // No `sql_mode` or time zone of the driver's own: the user's SQL
-            // runs as the server's defaults say.
-            let mut options = MySqlConnectOptions::new()
-                .host("127.0.0.1")
-                .port(port)
-                .username(USER)
-                .ssl_mode(MySqlSslMode::Disabled)
-                .pipes_as_concat(false)
-                .no_engine_substitution(false)
-                .timezone(None)
-                .disable_statement_logging();
-            if let Some(database) = database {
-                options = options.database(database);
-            }
-            let mut conn = options.connect().await.map_err(db_error)?;
+            let mut conn = mysql_options(port, database)
+                .connect()
+                .await
+                .map_err(db_error)?;
             for sql in [
                 "SET SESSION TRANSACTION READ ONLY".to_owned(),
                 format!("SET SESSION max_execution_time = {LIMIT_MS}"),
@@ -221,16 +249,7 @@ async fn connect(server: DbServer, port: u16, database: Option<&str>) -> Result<
             Ok(Conn::Mysql(conn))
         }
         DbServer::Postgres => {
-            let options = PgConnectOptions::new_without_pgpass()
-                .host("127.0.0.1")
-                .hostaddr(Ipv4Addr::LOCALHOST)
-                .port(port)
-                .username(USER)
-                .password("")
-                .database(database.unwrap_or(POSTGRES_HOME))
-                .ssl_mode(PgSslMode::Disable)
-                .application_name("marsa")
-                .disable_statement_logging();
+            let options = pg_options(port, database);
             no_startup_options(&options)?;
             let mut conn = options.connect().await.map_err(db_error)?;
             for sql in [
