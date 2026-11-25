@@ -3,12 +3,13 @@
 
 use std::path::Path;
 
-use eframe::egui::Ui;
+use eframe::egui::{Align, Label, Ui};
 
 use crate::strings;
+use crate::theme::page::DUMPS_STATE_WIDTH;
 use crate::theme::{Section, Theme};
-use crate::widgets::table::padded_card;
-use crate::widgets::{Glyph, Icon, NoticeKind, Text};
+use crate::widgets::table::{card, padded_card};
+use crate::widgets::{Button, Glyph, Icon, NoticeKind, Text};
 
 /// A sentence in a card, in place of a table.
 pub(crate) fn message(ui: &mut Ui, theme: &Theme, text: &str) {
@@ -60,4 +61,42 @@ pub(crate) fn path(ui: &mut Ui, theme: &Theme, folder: &Path, home: Option<&Path
     // Shortened for the eye, or cut short by the column: the whole path is
     // one hover away.
     response.on_hover_text(folder.display().to_string());
+}
+
+/// A card that fills the height left, with a sentence, a caption under it,
+/// and the button of the fix if there is one, in the middle. Returns
+/// whether the button was pressed.
+pub(crate) fn state(
+    ui: &mut Ui,
+    theme: &Theme,
+    sentence: &str,
+    how: &str,
+    button: Option<Button<'_>>,
+) -> bool {
+    use eframe::egui::text::LayoutJob;
+    card(ui, |ui| {
+        let room = ui.available_height();
+        ui.set_min_height(room);
+        let width = ui.available_width().min(DUMPS_STATE_WIDTH);
+        // Laid out first, to center the block on the card's height.
+        let centered = |text: &str, font, color| {
+            let mut job = LayoutJob::simple(text.to_owned(), font, color, width);
+            job.halign = Align::Center;
+            ui.painter().layout_job(job)
+        };
+        let first = centered(sentence, theme.text.body.font_id(), theme.color.ink);
+        let second = centered(how, theme.text.body_sm.font_id(), theme.color.mute);
+        let gap = theme.space.s3;
+        let fix = button.as_ref().map_or(0.0, |_| gap + theme.size.control);
+        let block = first.size().y + gap + second.size().y + fix;
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing.y = gap;
+            ui.add_space(0.0_f32.midpoint(room - block).max(theme.space.s6));
+            ui.add(Label::new(first).selectable(false));
+            ui.add(Label::new(second).selectable(false));
+            button.is_some_and(|button| ui.add(button).clicked())
+        })
+        .inner
+    })
+    .inner
 }

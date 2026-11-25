@@ -18,6 +18,7 @@ use marsa_core::types::{
 };
 use semver::Version;
 
+mod db_browser;
 mod dumps;
 mod installs;
 mod logs;
@@ -30,6 +31,7 @@ mod session;
 mod setup;
 mod sites;
 
+pub use db_browser::{DbBrowserState, DbScreen};
 pub use dumps::DumpsState;
 use installs::Install;
 pub use installs::{InstallJob, InstallStep, InstallView, install_version};
@@ -112,6 +114,8 @@ pub enum Route {
     Logs(LogSource),
     Mail,
     Dumps,
+    /// The database browser (ADR 0028).
+    Databases,
     Settings,
 }
 
@@ -255,6 +259,7 @@ impl Model {
             } => self.not_removed(removal, code, in_use),
             Update::Xdebug(state) => self.session.xdebug = Some(state),
             Update::XdebugFailed(code) => self.session.notices.set_code(NoticeSource::Xdebug, code),
+            Update::Db(update) => self.db_update(update),
             Update::Mail(list) => self.set_mail(list),
             Update::MailText(text) => self.set_mail_text(text),
             Update::MailFailed(code) => self.mail_failed(code),
@@ -311,7 +316,9 @@ impl Model {
     /// for it. Called after each action and each message from the daemon, so
     /// a job that waited starts when the one before it ends.
     pub fn next_command(&mut self) -> Option<Command> {
-        self.next_install().map(Command::Install)
+        self.next_install()
+            .map(Command::Install)
+            .or_else(|| self.next_db_command())
     }
 
     /// The folder the user picked in the system's dialog.
@@ -339,6 +346,13 @@ impl Model {
                 if let Route::Runtimes(runtime) = &route {
                     self.runtime_chosen = Some(*runtime);
                 }
+                // Leaving Databases drops its lists and closes the daemon's
+                // connections; opening it reads what can be opened.
+                let databases = route == Route::Databases;
+                if self.route == Route::Databases && !databases {
+                    self.leave_databases();
+                }
+                let entered = databases && self.route != Route::Databases;
                 // No event carries mail: the screen reads it as it opens.
                 let read = route == Route::Mail;
                 // Opening the screen counts every dump as seen, and asks
@@ -346,7 +360,9 @@ impl Model {
                 let dumps = route == Route::Dumps;
                 self.session.dumps.set_open(dumps);
                 self.route = route;
-                if read {
+                if entered {
+                    self.open_databases()
+                } else if read {
                     self.read_mail()
                 } else if dumps && self.is_connected() {
                     Some(Command::ReadDumps)
@@ -467,6 +483,12 @@ impl Model {
                 Removal::Mail => Command::ClearMail,
                 removal => Command::Remove(removal),
             }),
+            Action::ChooseDbSource(source) => self.choose_db_source(source),
+            Action::FilterDbTables(text) => {
+                self.filter_db_tables(text);
+                None
+            }
+            Action::ReadDbSources => self.open_databases(),
             Action::ChooseMail(id) => self.choose_mail(id),
             Action::ChooseDump(id) => {
                 self.choose_dump(id);
@@ -504,6 +526,24 @@ impl Model {
 pub fn apply(model: &mut Model, event: Event) {
     match event {
         Event::ServiceChanged(status) => {
+            // A SQL server started or stopped: what Databases can open changed.
+            let sql_server = matches!(
+                status.id,
+                ServiceId::Database(
+                    marsa_core::databases::ServerKind::Mysql
+                        | marsa_core::databases::ServerKind::Postgres
+                )
+            );
+            if sql_server
+                && model
+                    .session
+                    .services
+                    .iter()
+                    .find(|s| s.id == status.id)
+                    .is_none_or(|old| old.state != status.state)
+            {
+                model.db_sources_changed();
+            }
             // A new run of a service may get a new log buffer whose `seq`
             // starts again at 0, so the old `seq` must not hide it.
             if status.state == ServiceState::Starting
@@ -523,7 +563,10 @@ pub fn apply(model: &mut Model, event: Event) {
         Event::Log(line) => model.push_log(line),
         Event::Install(progress) => model.install_event(progress),
         // The whole new list: no need to ask the daemon again.
-        Event::SitesChanged(list) => model.set_sites(list),
+        Event::SitesChanged(list) => {
+            model.set_sites(list);
+            model.db_sources_changed();
+        }
         Event::DefaultChanged(default) => {
             let row = model
                 .session

@@ -66,5 +66,11 @@ pub const MAIL_STATE_WIDTH: f32 = 440.0;
 /// The Dumps screen (layout.md, Dumps screen): the same shape as Mail, so
 /// the same widths, under names of its own.
 pub const DUMPS_LIST_WIDTH: f32 = MAIL_LIST_WIDTH;
+/// The tables of a database, on the start side of Databases (layout.md).
+pub const DB_LIST_WIDTH: f32 = 210.0;
+/// The end column of the list's rows: a table's estimate, or "view".
+pub const DB_LIST_END: f32 = 64.0;
+/// The end column of the table of tables: its kind and estimate.
+pub const DB_DETAIL_END: f32 = 180.0;
 pub const DUMPS_FACT_LABEL: f32 = 60.0;
 pub const DUMPS_STATE_WIDTH: f32 = MAIL_STATE_WIDTH;
