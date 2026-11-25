@@ -258,15 +258,10 @@ impl<'a> Grid<'a> {
                 _ => "",
             };
             let text = format!("{}{arrow}", column.name);
-            text_in(
-                &painter,
-                theme,
-                cell,
-                &text,
-                font.clone(),
-                theme.color.ink2,
-                false,
-            );
+            // A number column's header sits at the end, over its numbers.
+            let end = column.kind == DbColumnKind::Number;
+            let color = theme.color.ink2;
+            text_in(&painter, theme, cell, &text, font.clone(), color, end);
             if focused && self.current == (None, index) {
                 ring(&painter, theme, cell);
             }
