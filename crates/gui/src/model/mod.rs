@@ -31,7 +31,7 @@ mod session;
 mod setup;
 mod sites;
 
-pub use db_browser::{DbBrowserState, DbScreen};
+pub use db_browser::{DbAction, DbBrowserState, DbScreen, DbTab, OpenTable, PaneValue};
 pub use dumps::DumpsState;
 use installs::Install;
 pub use installs::{InstallJob, InstallStep, InstallView, install_version};
@@ -308,6 +308,9 @@ impl Model {
                 .dumps
                 .shown()
                 .map_or(Effect::None, |dump| Effect::CopyText(dump.text.clone())),
+            Action::Db(DbAction::Copy) => {
+                self.db_copy_text().map_or(Effect::None, Effect::CopyText)
+            }
             action => self.change(action).or_else(|| self.next_command()).into(),
         }
     }
@@ -489,6 +492,7 @@ impl Model {
                 None
             }
             Action::ReadDbSources => self.open_databases(),
+            Action::Db(action) => self.db_action(action),
             Action::ChooseMail(id) => self.choose_mail(id),
             Action::ChooseDump(id) => {
                 self.choose_dump(id);

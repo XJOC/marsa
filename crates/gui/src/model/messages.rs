@@ -131,6 +131,8 @@ pub enum Action {
     FilterDbTables(String),
     /// "Try again" on Databases: what can be opened is read again.
     ReadDbSources,
+    /// What the user did on the open table of Databases.
+    Db(super::DbAction),
     /// A sidebar item, or the status at its bottom.
     Navigate(Route),
     /// The fold button of the sidebar: hide or show the labels.

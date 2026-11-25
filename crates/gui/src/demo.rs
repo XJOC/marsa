@@ -99,6 +99,10 @@ pub enum Demo {
     Databases,
     /// `Databases` with MySQL stopped.
     DatabasesStopped,
+    /// `Databases` with `users` open: a page, a cell chosen, its value open.
+    DatabasesRows,
+    /// `DatabasesRows` on the Columns tab.
+    DatabasesColumns,
     /// The same as `Ok`, with six dumps, four of them new, the newest shown.
     Dumps,
     /// `Dumps` with the capture on and nothing caught yet.
@@ -151,6 +155,8 @@ fn parse(name: &str) -> Option<Demo> {
         "mail-stopped" => Demo::MailStopped,
         "databases" => Demo::Databases,
         "databases-stopped" => Demo::DatabasesStopped,
+        "databases-rows" => Demo::DatabasesRows,
+        "databases-columns" => Demo::DatabasesColumns,
         "confirm-delete-mail" => Demo::ConfirmDeleteMail,
         "dumps" => Demo::Dumps,
         "dumps-empty" => Demo::DumpsEmpty,
@@ -248,7 +254,10 @@ pub fn fill(model: &mut Model, demo: Demo) {
     ) {
         mail::fill(model, demo, php);
     }
-    if matches!(demo, Demo::Databases | Demo::DatabasesStopped) {
+    if matches!(
+        demo,
+        Demo::Databases | Demo::DatabasesStopped | Demo::DatabasesRows | Demo::DatabasesColumns
+    ) {
         databases::fill(model, demo);
     }
     if matches!(
