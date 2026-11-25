@@ -26,6 +26,7 @@ pub mod badge;
 pub mod button;
 pub mod chip;
 pub mod dialog;
+pub mod editor;
 pub mod facts;
 pub mod field;
 pub mod grid;
