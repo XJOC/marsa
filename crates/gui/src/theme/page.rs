@@ -72,5 +72,7 @@ pub const DB_LIST_WIDTH: f32 = 210.0;
 pub const DB_LIST_END: f32 = 64.0;
 /// The end column of the table of tables: its kind and estimate.
 pub const DB_DETAIL_END: f32 = 180.0;
+/// The value pane under the grid (layout.md, "Tables view, a table chosen").
+pub const DB_VALUE_HEIGHT: f32 = 128.0;
 pub const DUMPS_FACT_LABEL: f32 = 60.0;
 pub const DUMPS_STATE_WIDTH: f32 = MAIL_STATE_WIDTH;

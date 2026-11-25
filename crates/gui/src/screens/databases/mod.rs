@@ -4,19 +4,25 @@
 //! The menu in the header picks a source. The tables list on the start side
 //! filters as the user types, with no read; the detail lists the tables
 //! with the server's row estimates. Both draw only the rows in view, so a
-//! database with thousands of tables costs what a small one does.
+//! database with thousands of tables costs what a small one does. A table
+//! chosen in the list opens in the detail ([`rows`]).
 
-use eframe::egui::{Align, Layout, ScrollArea, Ui, Vec2, vec2};
-use marsa_core::types::{DbServer, DbSource, DbTableKind, ServiceAction, ServiceId};
+use eframe::egui::{
+    Align, CornerRadius, Key, KeyboardShortcut, Layout, Modifiers, ScrollArea, Sense, Stroke,
+    StrokeKind, Ui, Vec2, vec2,
+};
+use marsa_core::types::{DbServer, DbSource, DbTableKind, DbTableRef, ServiceAction, ServiceId};
 
 use super::lines::{message, state};
-use crate::model::{Action, DbScreen, Model};
+use crate::model::{Action, DbAction, DbScreen, Model, OpenTable};
 use crate::strings;
 use crate::theme::page::{DB_DETAIL_END, DB_LIST_END, DB_LIST_WIDTH};
 use crate::theme::{Direction, Section, Theme};
+use crate::widgets::list_item;
 use crate::widgets::menu::{Item as MenuItem, Menu};
 use crate::widgets::table::card;
 use crate::widgets::{Button, Field, Text};
+use crate::widgets::{Look, Touch};
 
 /// What the screen shows, from the model.
 pub(crate) struct DatabasesView<'a> {
@@ -46,8 +52,18 @@ pub(crate) enum Body<'a> {
     Tables(Tables<'a>),
 }
 
+mod rows;
+
+/// Refresh: F5, or Cmd R on macOS and Ctrl R elsewhere.
+const REFRESH_KEYS: [KeyboardShortcut; 2] = [
+    KeyboardShortcut::new(Modifiers::NONE, Key::F5),
+    KeyboardShortcut::new(Modifiers::COMMAND, Key::R),
+];
+
 pub(crate) struct Tables<'a> {
     pub filter: &'a str,
+    /// The table chosen in the list, opened in the detail.
+    pub open: Option<&'a OpenTable>,
     /// The tables after the filter.
     pub rows: Vec<Row>,
     /// "No tables in blog yet.", when the database has none.
@@ -55,6 +71,7 @@ pub(crate) struct Tables<'a> {
 }
 
 pub(crate) struct Row {
+    pub table: DbTableRef,
     pub name: String,
     pub view: bool,
     /// "12.4k", for the list.
@@ -118,6 +135,7 @@ fn tables(model: &Model) -> Tables<'_> {
         .shown_tables()
         .into_iter()
         .map(|info| Row {
+            table: info.table.clone(),
             name: match info.table.schema.as_deref() {
                 Some(schema) if schema != "public" => format!("{schema}.{}", info.table.name),
                 _ => info.table.name.clone(),
@@ -133,6 +151,7 @@ fn tables(model: &Model) -> Tables<'_> {
         .flatten();
     Tables {
         filter: &db.filter,
+        open: db.open.as_ref(),
         rows,
         none,
     }
@@ -216,7 +235,10 @@ fn split(ui: &mut Ui, theme: &Theme, tables: &Tables<'_>, actions: &mut Vec<Acti
             list(ui, theme, tables, actions);
         });
         let rest = vec2(ui.available_width(), height);
-        ui.allocate_ui_with_layout(rest, column, |ui| detail(ui, theme, tables));
+        ui.allocate_ui_with_layout(rest, column, |ui| match tables.open {
+            Some(open) => table_view(ui, theme, open, actions),
+            None => detail(ui, theme, tables),
+        });
     });
 }
 
@@ -243,10 +265,88 @@ fn list(ui: &mut Ui, theme: &Theme, tables: &Tables<'_>, actions: &mut Vec<Actio
                     } else {
                         item.short.as_str()
                     };
+                    let chosen = tables.open.is_some_and(|open| open.table == item.table);
+                    let rect = ui.available_rect_before_wrap();
+                    let rect = rect.with_max_y(rect.top() + row);
+                    // Clicks only: the list's one focus stop is below.
+                    let response = ui.interact(rect, ui.scope_id().with(&item.table), Sense::CLICK);
+                    let look = Look {
+                        touch: Touch::of(&response),
+                        focused: false,
+                    };
+                    let paint = list_item::paint(theme, chosen, look);
+                    let corner = CornerRadius::same(theme.radius.md);
+                    if let Some(fill) = paint.fill {
+                        ui.painter().rect_filled(rect, corner, fill);
+                    }
+                    if let Some(border) = paint.border {
+                        let stroke = Stroke::new(theme.size.border, border);
+                        ui.painter()
+                            .rect_stroke(rect, corner, stroke, StrokeKind::Inside);
+                    }
                     line(ui, theme, row, &item.name, caption, DB_LIST_END);
+                    if response.clicked() {
+                        actions.push(Action::Db(DbAction::ChooseTable(item.table.clone())));
+                    }
                 }
             });
     });
+    list_keys(ui, tables, actions);
+}
+
+/// Up and Down on the list choose the table before or after the open one.
+/// The list is one stop: its rows take clicks, not the focus.
+fn list_keys(ui: &mut Ui, tables: &Tables<'_>, actions: &mut Vec<Action>) {
+    let now = tables
+        .open
+        .and_then(|open| tables.rows.iter().position(|row| row.table == open.table));
+    let step = ui.input_mut(|input| {
+        if input.consume_key(Modifiers::ALT, Key::ArrowDown) {
+            Some(1_isize)
+        } else if input.consume_key(Modifiers::ALT, Key::ArrowUp) {
+            Some(-1)
+        } else {
+            None
+        }
+    });
+    let Some(step) = step else {
+        return;
+    };
+    let last = tables.rows.len().saturating_sub(1);
+    let next = match now {
+        Some(at) => at.saturating_add_signed(step).min(last),
+        None => 0,
+    };
+    if let Some(row) = tables.rows.get(next)
+        && Some(next) != now
+    {
+        actions.push(Action::Db(DbAction::ChooseTable(row.table.clone())));
+    }
+}
+
+/// The open table: its name and Refresh, then its rows.
+fn table_view(ui: &mut Ui, theme: &Theme, open: &OpenTable, actions: &mut Vec<Action>) {
+    ui.spacing_mut().item_spacing.y = theme.space.s3;
+    let line = vec2(ui.available_width(), theme.size.control);
+    ui.allocate_ui_with_layout(line, Direction::CURRENT.row(), |ui| {
+        let name = match open.table.schema.as_deref() {
+            Some(schema) if schema != "public" => format!("{schema}.{}", open.table.name),
+            _ => open.table.name.clone(),
+        };
+        ui.add(Text::new(&name, theme.text.heading, theme.color.ink).truncate());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let refresh = Button::secondary(strings::DB_REFRESH).in_row();
+            let keys = ui.input_mut(|input| {
+                REFRESH_KEYS
+                    .iter()
+                    .any(|shortcut| input.consume_shortcut(shortcut))
+            });
+            if ui.add(refresh).clicked() || keys {
+                actions.push(Action::Db(DbAction::Refresh));
+            }
+        });
+    });
+    rows::show(ui, theme, open, actions);
 }
 
 /// The tables with their kind and estimate, then a caption.

@@ -80,7 +80,7 @@ pub struct PaneValue {
 
 impl OpenTable {
     /// The table, with nothing read yet.
-    pub(super) fn closed(table: DbTableRef) -> Self {
+    pub(crate) fn closed(table: DbTableRef) -> Self {
         Self {
             table,
             tab: DbTab::Rows,

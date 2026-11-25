@@ -16,8 +16,8 @@
 
 use eframe::egui::text::{LayoutJob, TextWrapping};
 use eframe::egui::{
-    Align2, Color32, CornerRadius, Event, EventFilter, FontId, Key, Modifiers, Painter, Rect, Role,
-    ScrollArea, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, pos2, vec2,
+    Align2, Color32, CornerRadius, Event, EventFilter, FontId, Key, Modifiers, Painter, Pos2, Rect,
+    Role, ScrollArea, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 use marsa_core::types::{DbCell, DbColumnKind, DbPageColumn};
 
@@ -252,16 +252,34 @@ impl<'a> Grid<'a> {
                 continue;
             }
             let column = &self.columns[index];
-            let arrow = match self.sorted {
-                Some((sorted, false)) if sorted == index => " ↑",
-                Some((sorted, true)) if sorted == index => " ↓",
-                _ => "",
-            };
-            let text = format!("{}{arrow}", column.name);
             // A number column's header sits at the end, over its numbers.
             let end = column.kind == DbColumnKind::Number;
             let color = theme.color.ink2;
-            text_in(&painter, theme, cell, &text, font.clone(), color, end);
+            let sorted = self.sorted.filter(|(sorted, _)| *sorted == index);
+            // Room for the sort mark on the side away from the cell's edge.
+            let mark = theme.space.s2 + theme.space.s1;
+            let text_cell = match (sorted, end) {
+                (None, _) => cell,
+                (Some(_), false) => cell.with_max_x(cell.right() - mark),
+                (Some(_), true) => cell.with_min_x(cell.left() + mark),
+            };
+            let drawn = text_in(
+                &painter,
+                theme,
+                text_cell,
+                &column.name,
+                font.clone(),
+                color,
+                end,
+            );
+            if let Some((_, descending)) = sorted {
+                let x = if end {
+                    drawn.left() - mark
+                } else {
+                    drawn.right() + theme.space.s1
+                };
+                sort_mark(&painter, theme, pos2(x, cell.center().y), descending);
+            }
             if focused && self.current == (None, index) {
                 ring(&painter, theme, cell);
             }
@@ -351,12 +369,20 @@ pub fn column_widths(ui: &Ui, columns: &[DbPageColumn], rows: &[Vec<DbCell>]) ->
         .iter()
         .enumerate()
         .map(|(index, column)| {
+            // The header with room for the sort mark.
             let header = measure(&column.name, theme.text.body_sm.font_id()) + theme.space.s4;
             let widest = sample
                 .iter()
                 .filter_map(|row| match row.get(index) {
+                    // The face the cell is drawn in (see `row`).
                     Some(DbCell::Text(text) | DbCell::Cut { text, .. }) => {
-                        Some(measure(text, theme.text.mono_sm.font_id()))
+                        let mono = matches!(column.kind, DbColumnKind::Number | DbColumnKind::Time);
+                        let font = if mono {
+                            theme.text.mono_sm.font_id()
+                        } else {
+                            theme.text.body_sm.font_id()
+                        };
+                        Some(measure(text, font))
                     }
                     Some(DbCell::Binary { bytes }) => {
                         let text = strings::binary_value(*bytes);
@@ -372,7 +398,7 @@ pub fn column_widths(ui: &Ui, columns: &[DbPageColumn], rows: &[Vec<DbCell>]) ->
 }
 
 /// One line of `text` in `cell`, cut with "…" when it does not fit; at the
-/// end of the cell when `end`.
+/// end of the cell when `end`. The rectangle the text took.
 fn text_in(
     painter: &Painter,
     theme: &Theme,
@@ -381,7 +407,7 @@ fn text_in(
     font: FontId,
     color: Color32,
     end: bool,
-) {
+) -> Rect {
     let room = (cell.width() - theme.space.s3 - theme.space.s3).max(0.0);
     let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
     job.wrap = TextWrapping {
@@ -397,8 +423,30 @@ fn text_in(
     } else {
         Align2::LEFT_CENTER
     };
-    let at = align.align_size_within_rect(galley.size(), inner).min;
-    painter.galley(at, galley, color);
+    let drawn = align.align_size_within_rect(galley.size(), inner);
+    painter.galley(drawn.min, galley, color);
+    drawn
+}
+
+/// The sorted column's mark: a small triangle up (ascending) or down, its
+/// start at `at`. Drawn, not a glyph: the window's fonts lack the arrows.
+fn sort_mark(painter: &Painter, theme: &Theme, at: Pos2, descending: bool) {
+    let half = theme.space.s1;
+    let (tip, base) = if descending {
+        (at.y + half, at.y - half)
+    } else {
+        (at.y - half, at.y + half)
+    };
+    let points = vec![
+        pos2(at.x, base),
+        pos2(at.x + half + half, base),
+        pos2(at.x + half, tip),
+    ];
+    painter.add(Shape::convex_polygon(
+        points,
+        theme.color.ink2,
+        Stroke::NONE,
+    ));
 }
 
 fn divider(painter: &Painter, theme: &Theme, rect: Rect) {
@@ -654,6 +702,43 @@ mod tests {
         assert_eq!(widths.len(), 3);
         assert_eq!(widths[1], LIGHT.size.grid_column_max);
         assert!(widths.iter().all(|w| *w >= LIGHT.size.grid_column_min));
+    }
+
+    #[test]
+    fn null_the_text_null_and_an_empty_text_draw_three_ways() {
+        let harness = Harness::new(egui::Theme::Light);
+        let columns = vec![DbPageColumn {
+            name: "v".into(),
+            kind: DbColumnKind::Text,
+        }];
+        let widths = vec![100.0];
+        // The texts and the framed rectangles one cell draws.
+        let drawn = |cell: DbCell| {
+            let rows = vec![vec![cell]];
+            let shapes = harness.shapes(|ui| {
+                Grid::new("three", &columns, &rows, &widths, (None, 0)).show(ui);
+            });
+            let texts: Vec<String> = shapes
+                .iter()
+                .filter_map(|shape| match shape {
+                    Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .filter(|text| text != "v")
+                .collect();
+            let frames = shapes
+                .iter()
+                .filter(|shape| matches!(shape, Shape::Rect(rect) if rect.stroke.width > 0.0))
+                .count();
+            (texts, frames)
+        };
+        let null = drawn(DbCell::Null);
+        let text = drawn(DbCell::Text("NULL".into()));
+        let empty = drawn(DbCell::Text(String::new()));
+        assert_eq!(null, (vec!["NULL".to_owned()], 1), "a framed tag");
+        assert_eq!(text, (vec!["NULL".to_owned()], 0), "plain text");
+        assert_eq!(empty.1, 0);
+        assert!(empty.0.iter().all(String::is_empty), "nothing to read");
     }
 
     #[test]

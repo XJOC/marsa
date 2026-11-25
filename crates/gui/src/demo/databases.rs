@@ -1,17 +1,18 @@
 //! The Databases screen's fake data: MySQL with two databases and a site's
-//! SQLite file, the tables of `shop` open; or MySQL stopped.
+//! SQLite file, the tables of `shop` open; or MySQL stopped; or the rows of
+//! `users`, a cell chosen and its value open.
 
 use marsa_core::types::{
-    DbDatabase, DbServer, DbServerInfo, DbSiteFile, DbSource, DbSources, DbTableInfo, DbTableKind,
-    DbTableRef, DbTables, ServiceState,
+    DbCell, DbColumnKind, DbDatabase, DbPage, DbPageColumn, DbServer, DbServerInfo, DbSiteFile,
+    DbSource, DbSources, DbTableInfo, DbTableKind, DbTableRef, DbTables, DbTotal, ServiceState,
 };
 
 use super::Demo;
-use crate::model::{Model, Route};
+use crate::model::{Model, OpenTable, Route};
 
 pub(super) fn fill(model: &mut Model, demo: Demo) {
     model.route = Route::Databases;
-    let running = demo == Demo::Databases;
+    let running = demo != Demo::DatabasesStopped;
     let databases = ["app", "shop"]
         .iter()
         .filter(|_| running)
@@ -69,4 +70,82 @@ pub(super) fn fill(model: &mut Model, demo: Demo) {
             table("users", DbTableKind::Table, Some(1_250_000)),
         ],
     });
+    if demo == Demo::DatabasesRows {
+        db.open = Some(users_open());
+    }
+}
+
+/// `users`, sorted by `id`, its first page; the `settings` of the first row
+/// open in the value pane.
+fn users_open() -> OpenTable {
+    let column = |name: &str, kind| DbPageColumn {
+        name: name.into(),
+        kind,
+    };
+    let people = [
+        ("Omar Haddad", "omar", Some("2026-03-02 09:14:55"), "1"),
+        ("Lina Saleh", "lina", Some("2026-03-02 10:01:12"), "0"),
+        ("Sam Carter", "sam", None, "0"),
+        ("Noor Aziz", "noor", Some("2026-03-04 18:40:03"), "0"),
+        ("Maya Stone", "maya", Some("2026-03-05 07:22:41"), "0"),
+        ("Yusuf Karim", "yusuf", None, "0"),
+        ("Ella Brooks", "ella", Some("2026-03-09 13:05:27"), "0"),
+        ("Hana Mori", "hana", Some("2026-03-11 21:48:09"), "1"),
+        ("Adam Reyes", "adam", Some("2026-03-12 08:30:00"), "0"),
+        ("Sara Nasser", "sara", Some("2026-03-12 16:12:44"), "0"),
+        ("Leo Marsh", "leo", None, "0"),
+        ("Dana Khoury", "dana", Some("2026-03-15 11:11:11"), "0"),
+        ("Ivan Petrov", "ivan", Some("2026-03-16 19:02:36"), "0"),
+        ("Rania Fares", "rania", Some("2026-03-18 06:55:20"), "0"),
+    ];
+    let settings = "{\"theme\":\"dark\",\"locale\":\"ar\",\"digest\":{\"weekly\":true,\"hour\":8},\
+        \"beta\":[\"grid\",\"sql\",\"keys\"],\"shortcuts\":{\"open\":\"cmd+o\",\"run\":\"cmd+enter\"},\
+        \"seen_tips\":[1,2,3,5,8,13],\"timezone\":\"Asia/Riyadh\"}";
+    let text = |text: &str| DbCell::Text(text.into());
+    let rows = people
+        .iter()
+        .enumerate()
+        .map(|(index, (name, mail, verified, admin))| {
+            vec![
+                text(&(index + 1).to_string()),
+                text(name),
+                text(&format!("{mail}@example.test")),
+                verified.map_or(DbCell::Null, text),
+                text(admin),
+                match index % 3 {
+                    0 => text(settings),
+                    1 => text("{\"theme\":\"light\",\"locale\":\"en\"}"),
+                    _ => DbCell::Null,
+                },
+                text(&format!("2026-03-{:02} 09:14:55", index + 2)),
+            ]
+        })
+        .collect();
+    let mut open = OpenTable::closed(DbTableRef {
+        schema: None,
+        name: "users".into(),
+    });
+    open.page = Some(DbPage {
+        columns: vec![
+            column("id", DbColumnKind::Number),
+            column("name", DbColumnKind::Text),
+            column("email", DbColumnKind::Text),
+            column("email_verified_at", DbColumnKind::Time),
+            column("is_admin", DbColumnKind::Number),
+            column("settings", DbColumnKind::Text),
+            column("created_at", DbColumnKind::Time),
+        ],
+        key: vec![0],
+        rows,
+        offset: 0,
+        total: DbTotal {
+            rows: 12_408,
+            exact: true,
+        },
+    });
+    open.serial = 1;
+    open.sort = Some(("id".into(), false));
+    open.current = (Some(0), 5);
+    open.pane = true;
+    open
 }
