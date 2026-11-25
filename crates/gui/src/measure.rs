@@ -15,6 +15,11 @@
 //! `logs` are 0, `scroll` is 0, and `idle` is 60 when left out; with
 //! nothing to list the window opens on Home.
 //!
+//! `sql=5000,type=200` shows only the SQL editor, with a made-up text of
+//! 5000 lines. After the idle time it clicks into the middle line, types
+//! one character a frame, 200 times, and logs the resident memory before
+//! and after, and the frame times: typing must not grow the memory.
+//!
 //! It can never touch a real data folder: it starts no bridge and no daemon,
 //! and it refuses to start unless the data folder is missing or empty, which
 //! a folder Marsa has used never is. Without the variable nothing here runs.
@@ -31,6 +36,7 @@ use marsa_core::types::{
 };
 
 use crate::model::{LogSource, Model, Route, Update};
+use crate::widgets::editor::buffer::{Buffer, Pos};
 
 /// The variable that asks for the mode.
 const VAR: &str = "MARSA_GUI_MEASURE";
@@ -61,6 +67,11 @@ pub struct Plan {
     /// How many frames the wheel turns on the list after that: up for half
     /// of them, then back down. None: no scroll.
     pub scroll: u32,
+    /// How many lines the made-up SQL text has; with any, the window shows
+    /// only the editor.
+    pub sql: usize,
+    /// How many characters are typed into the editor after the idle time.
+    pub typing: u32,
 }
 
 /// Why the mode cannot start.
@@ -110,6 +121,8 @@ fn parse(text: &str) -> Option<Plan> {
         dumps: 0,
         idle: IDLE,
         scroll: 0,
+        sql: 0,
+        typing: 0,
     };
     for part in text.split(',').filter(|part| !part.trim().is_empty()) {
         let (key, value) = part.split_once('=')?;
@@ -120,6 +133,8 @@ fn parse(text: &str) -> Option<Plan> {
             "dumps" => plan.dumps = usize::try_from(value).ok()?,
             "idle" => plan.idle = Duration::from_secs(value),
             "scroll" => plan.scroll = u32::try_from(value).ok()?,
+            "sql" => plan.sql = usize::try_from(value).ok()?,
+            "type" => plan.typing = u32::try_from(value).ok()?,
             _ => return None,
         }
     }
@@ -338,10 +353,25 @@ pub struct Run {
     /// The result is logged and the window is closing: one more frame may
     /// run before it does.
     done: bool,
+    /// The SQL editor's text, when the plan types into it.
+    editor: Option<Buffer>,
+    /// The resident memory when typing began, in KiB.
+    rss_before_kib: Option<u64>,
 }
 
 impl Run {
-    pub const fn new(plan: Plan) -> Self {
+    pub fn new(plan: Plan) -> Self {
+        let editor = (plan.sql > 0).then(|| {
+            let text = sql_text(plan.sql);
+            // Room for the typing: this text is longer than the screen allows.
+            let mut buffer = Buffer::new(&text, text.len() * 2);
+            let middle = Pos {
+                line: plan.sql / 2,
+                col: 0,
+            };
+            buffer.set_cursor(middle, false);
+            buffer
+        });
         Self {
             plan,
             first_frame_ms: 0,
@@ -365,6 +395,23 @@ impl Run {
                 worst: 0.0,
             },
             done: false,
+            editor,
+            rss_before_kib: None,
+        }
+    }
+
+    /// The editor the window shows instead of the screens, if the plan types.
+    pub fn editor(&mut self) -> Option<&mut Buffer> {
+        self.editor.as_mut()
+    }
+
+    /// The frames after the idle time: the wheel's turns, or the click into
+    /// the editor, its release, and each character typed.
+    fn actions(&self) -> u32 {
+        if self.plan.sql > 0 {
+            self.plan.typing + 2
+        } else {
+            self.plan.scroll
         }
     }
 
@@ -375,7 +422,7 @@ impl Run {
 
     /// Whether the idle time is over and the wheel turns now.
     fn scrolling(&self, since: Duration) -> bool {
-        since >= SETTLE + self.plan.idle && self.scrolled < self.plan.scroll
+        since >= SETTLE + self.plan.idle && self.scrolled < self.actions()
     }
 
     /// Before a frame: while the wheel turns, the events of one turn. The
@@ -388,8 +435,27 @@ impl Run {
         if !self.scrolling(first.elapsed()) {
             return;
         }
+        let (x, y) = SCROLL_AT;
+        let at = egui::pos2(x, y);
+        if self.plan.sql > 0 {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let event = match self.scrolled {
+                0 => button(true),
+                1 => button(false),
+                _ => egui::Event::Text("x".to_owned()),
+            };
+            if self.scrolled == 0 {
+                input.events.push(egui::Event::PointerMoved(at));
+            }
+            input.events.push(event);
+            return;
+        }
         if self.scrolled == 0 {
-            let (x, y) = SCROLL_AT;
             input
                 .events
                 .push(egui::Event::PointerMoved(egui::pos2(x, y)));
@@ -420,6 +486,9 @@ impl Run {
             return;
         }
         if self.scrolling(since) {
+            if self.scrolled == 0 && self.editor.is_some() {
+                self.rss_before_kib = resident_kib();
+            }
             // The first frame of the scroll follows an idle one: not counted.
             if self.scrolled > 0 {
                 self.ui.add(ui_cost.as_secs_f64());
@@ -440,6 +509,12 @@ impl Run {
                 sites = self.plan.sites,
                 logs = self.plan.logs,
                 dumps = self.plan.dumps,
+                sql = self.plan.sql,
+                typed = self.plan.typing,
+                rss_before_kib = self.rss_before_kib,
+                rss_after_kib = self.editor.as_ref().and_then(|_| resident_kib()),
+                // The text's size after: the typing reached the editor.
+                sql_bytes = self.editor.as_ref().map(Buffer::len),
                 first_frame_ms = self.first_frame_ms,
                 idle_secs = self.plan.idle.as_secs(),
                 idle_frames = self.idle_frames,
@@ -462,6 +537,58 @@ impl Run {
     }
 }
 
+/// `lines` lines of SQL as a project might have: statements, comments,
+/// and a string now and then.
+fn sql_text(lines: usize) -> String {
+    (0..lines)
+        .map(|n| match n % 4 {
+            0 => format!("-- step {n}: the orders of one customer"),
+            1 => format!("select id, total, 'paid' as state from orders where customer_id = {n}"),
+            2 => "  and created_at > '2026-01-01' /* this year */".to_owned(),
+            _ => "  order by id desc limit 50;".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The window's resident memory, in KiB, from the system's own tool. The
+/// measurement runs on all three systems and is a tool, not a feature: the
+/// system's programs keep it free of `unsafe` and of new dependencies.
+fn resident_kib() -> Option<u64> {
+    let pid = std::process::id().to_string();
+    // The tool differs by system; this module is built only for measuring.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = pid;
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+        line.split_whitespace().nth(1)?.parse().ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-o", "rss=", "-p", &pid])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    }
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot")?;
+        let tasklist = Path::new(&root).join("System32").join("tasklist.exe");
+        let filter = format!("PID eq {pid}");
+        let output = std::process::Command::new(tasklist)
+            .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+            .output()
+            .ok()?;
+        // "marsa-gui.exe","4321","Console","1","52,344 K"
+        let text = String::from_utf8_lossy(&output.stdout);
+        let memory = text.trim().rsplit("\",\"").next()?;
+        let digits: String = memory.chars().filter(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +602,8 @@ mod tests {
             dumps: 0,
             idle: IDLE,
             scroll: 0,
+            sql: 0,
+            typing: 0,
         }
     }
 

@@ -246,10 +246,12 @@ impl eframe::App for App {
         if self.aids.show_gallery(ui) {
             return;
         }
-        let picking = self.picker.is_some();
-        let output = shell::show(ui, &self.model, picking);
-        for action in output.actions {
-            self.run(ui.ctx(), action);
+        if !self.aids.show_editor(ui) {
+            let picking = self.picker.is_some();
+            let output = shell::show(ui, &self.model, picking);
+            for action in output.actions {
+                self.run(ui.ctx(), action);
+            }
         }
         let cpu = frame.info().cpu_usage;
         let connected = self.model.is_connected();
@@ -338,6 +340,8 @@ mod tests {
             dumps: 0,
             idle: std::time::Duration::from_secs(1),
             scroll: 0,
+            sql: 0,
+            typing: 0,
         };
         let measured = app(&ctx, dir.path(), Prefs::default()).measuring(plan);
         assert!(measured.model.is_connected());

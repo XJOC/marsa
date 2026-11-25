@@ -44,6 +44,15 @@ struct Edit {
     before: (Pos, Option<Pos>),
 }
 
+/// Lines an edit changed: from `line`, `removed` lines became `inserted`
+/// ones. The widget moves its per-line layout to match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Change {
+    pub line: usize,
+    pub removed: usize,
+    pub inserted: usize,
+}
+
 /// How the cursor moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Move {
@@ -76,6 +85,8 @@ pub struct Buffer {
     limit: usize,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    /// The changes since [`Buffer::take_changes`].
+    changes: Vec<Change>,
 }
 
 impl Buffer {
@@ -93,7 +104,13 @@ impl Buffer {
             limit,
             undo: Vec::new(),
             redo: Vec::new(),
+            changes: Vec::new(),
         }
+    }
+
+    /// The lines changed since the last call, in order.
+    pub fn take_changes(&mut self) -> Vec<Change> {
+        std::mem::take(&mut self.changes)
     }
 
     pub fn lines(&self) -> &[String] {
@@ -375,6 +392,11 @@ impl Buffer {
         if new.is_empty() {
             new.push(String::new());
         }
+        self.changes.push(Change {
+            line: start.line,
+            removed: end.line - start.line + 1,
+            inserted: new.len(),
+        });
         self.lines.splice(start.line..=end.line, new);
         self.bytes = self.bytes - removed.len() + text.len();
         removed

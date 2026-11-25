@@ -364,6 +364,10 @@ pub struct Size {
     pub panel_edge: f32,
     /// The room between the menu-bar icon and the panel: 4.
     pub panel_gap: f32,
+    /// `size.editor.line`: the SQL editor's line height (mono 13): 18.
+    pub editor_line: f32,
+    /// `size.editor.gutter`: the SQL editor's line-number gutter: 40.
+    pub editor_gutter: f32,
 }
 
 /// `radius.*`, in egui's whole points.
@@ -503,6 +507,8 @@ pub const SIZE: Size = Size {
     switch_inset: 3.0,
     badge: 26.0,
     table_header: 34.0,
+    editor_line: 18.0,
+    editor_gutter: 40.0,
     grid_column_min: 64.0,
     grid_column_max: 320.0,
     grid_footer: 40.0,

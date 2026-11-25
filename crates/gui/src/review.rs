@@ -131,6 +131,23 @@ impl ReviewAids {
         false
     }
 
+    /// Draws the SQL editor in place of the screens when the measurement
+    /// types into it. `true` when it did.
+    pub(crate) fn show_editor(&mut self, ui: &mut egui::Ui) -> bool {
+        #[cfg(feature = "measure")]
+        if let Some(buffer) = self.measure.as_mut().and_then(crate::measure::Run::editor) {
+            let theme = crate::theme::Theme::of(ui.ctx());
+            let lines = (ui.available_height() / theme.size.editor_line) as usize;
+            let engine = marsa_core::db_browser::Engine::Mysql;
+            crate::widgets::editor::Editor::new("measure_editor", "SQL", buffer, engine, lines)
+                .show(ui);
+            return true;
+        }
+        #[cfg(not(feature = "measure"))]
+        let _ = ui;
+        false
+    }
+
     /// The screens were drawn: `built` is what building them took, `cpu` the
     /// last frame's cost, and `connected` whether the picture may be taken.
     pub(crate) fn frame_done(
