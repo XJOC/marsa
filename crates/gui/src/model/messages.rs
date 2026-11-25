@@ -22,6 +22,18 @@ pub enum Update {
     /// Recent lines of the services' logs (each line names its service),
     /// oldest first.
     Log(Vec<LogLine>),
+    /// Lines of the log of the Laravel site `site` that the bridge follows,
+    /// oldest first.
+    SiteLog {
+        site: String,
+        lines: Vec<SiteLogLine>,
+    },
+    /// The log of `site` cannot be followed, or its stream ended: a client
+    /// error code, such as `site_log_unsafe`.
+    SiteLogFailed {
+        site: String,
+        code: String,
+    },
     /// A call failed but the connection is fine. A client error code.
     Notice(String),
     /// The whole site list, read when a session starts and again after the

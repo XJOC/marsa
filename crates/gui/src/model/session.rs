@@ -85,6 +85,9 @@ pub struct Session {
     pub services: Vec<ServiceStatus>,
     /// The log of each service that has written one, by the service's id.
     pub(super) logs: BTreeMap<ServiceId, ServiceLog>,
+    /// The log of the Laravel site that Logs shows, while the bridge
+    /// follows it. Kept while the daemon is gone, as the services' logs are.
+    pub(super) site_log: Option<SiteLogState>,
     /// Sites sorted by name, the parked folders, and the skipped folders.
     pub sites: SiteList,
     /// As the daemon lists them.
