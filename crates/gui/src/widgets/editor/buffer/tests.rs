@@ -188,3 +188,25 @@ fn offsets_and_positions_agree_with_the_text() {
     }
     assert_eq!(buffer.pos_at(usize::MAX), at(2, 0));
 }
+
+#[test]
+fn each_edit_says_which_lines_it_changed() {
+    let mut buffer = Buffer::new("a\nb\nc", LIMIT);
+    buffer.take_changes();
+    buffer.set_cursor(at(1, 1), false);
+    typed(&mut buffer, "x");
+    buffer.insert("\n").expect("fits");
+    buffer.set_cursor(at(0, 0), false);
+    buffer.set_cursor(at(2, 0), true);
+    buffer.backspace();
+    let one = |line, removed, inserted| Change {
+        line,
+        removed,
+        inserted,
+    };
+    assert_eq!(
+        buffer.take_changes(),
+        [one(1, 1, 1), one(1, 1, 2), one(0, 3, 1)]
+    );
+    assert!(buffer.take_changes().is_empty());
+}
