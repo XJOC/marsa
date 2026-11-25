@@ -10,7 +10,7 @@
 
 use reqwest::Method;
 
-use super::{ClientError, DaemonClient, StreamItem};
+use super::{ClientError, DaemonClient, REQUEST_TIMEOUT, StreamItem};
 use crate::codes;
 use crate::runtimes::Runtime;
 use crate::types::{
@@ -173,6 +173,22 @@ impl DaemonClient {
     pub async fn job(&self, id: u64) -> Result<JobEvent, ClientError> {
         let id = id.to_string();
         self.call(Method::GET, &["v1", "jobs", &id]).await
+    }
+
+    /// `DELETE /v1/jobs/{id}`: cancels job `id`. Only a running statement of
+    /// the database browser can be cancelled; the job then ends `failed`
+    /// with `db_query_cancelled`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `job_not_cancellable` (409) for another kind of
+    /// job, `not_found` (404) for a job that does not run.
+    pub async fn cancel_job(&self, id: u64) -> Result<(), ClientError> {
+        let request = self
+            .http
+            .delete(self.url(&["v1", "jobs", &id.to_string()])?);
+        self.send(request.timeout(REQUEST_TIMEOUT)).await?;
+        Ok(())
     }
 
     /// Starts the job with `POST` to `segments` and follows it. `lost` is

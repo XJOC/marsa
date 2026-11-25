@@ -190,3 +190,116 @@ async fn close_drops_the_rows_no_one_read() {
     let (status, _) = results(&app, &event["id"]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// A statement that would run for hours in SQLite, reading the file all
+/// along (so it holds the file's shared lock), in constant memory.
+const LONG: &str = "SELECT count(*) FROM posts a, posts b, posts c, posts d";
+
+async fn start(app: &App, sql: &str) -> u64 {
+    let body = json!({ "source": blog(), "sql": sql });
+    let (status, json) = app
+        .router
+        .answer("POST", "/v1/jobs/db/query", Some(body))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{json}");
+    json["id"].as_u64().unwrap()
+}
+
+async fn ended(app: &App, id: u64) -> Value {
+    for _ in 0..300 {
+        let (_, event) = app
+            .router
+            .answer("GET", &format!("/v1/jobs/{id}"), None)
+            .await;
+        if event["status"] != "running" {
+            return event;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("job {id} did not end");
+}
+
+#[tokio::test]
+async fn a_running_statement_is_cancelled() {
+    let app = App::new();
+    let file = make_file(&app.site("blog").await, POSTS).await;
+    let id = start(&app, LONG).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let response = app
+        .router
+        .send("DELETE", &format!("/v1/jobs/{id}"), None)
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let event = ended(&app, id).await;
+    assert_eq!(
+        (event["status"].as_str(), event["code"].as_str()),
+        (Some("failed"), Some("db_query_cancelled"))
+    );
+    // Stopped inside SQLite, not only no longer awaited: while the read ran,
+    // it held the file's shared lock, and this write would wait and fail.
+    let writer = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&file)
+        .busy_timeout(Duration::from_secs(1));
+    let writer = sqlx::ConnectOptions::disable_statement_logging(writer);
+    let mut writer = sqlx::ConnectOptions::connect(&writer).await.unwrap();
+    let mut wrote = false;
+    for _ in 0..20 {
+        let insert = sqlx::query("INSERT INTO posts (title) VALUES ('after')");
+        if insert.execute(&mut writer).await.is_ok() {
+            wrote = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(wrote, "the cancelled statement still holds the file");
+    // It ran no longer: a new statement on the same file starts at once.
+    let again = query(&app, "SELECT 1").await;
+    assert_eq!(again["status"], "done", "{again}");
+    // Over: no job to cancel.
+    let (status, json) = app
+        .router
+        .answer("DELETE", &format!("/v1/jobs/{id}"), None)
+        .await;
+    assert_eq!(
+        (status, json["error"]["code"].as_str()),
+        (StatusCode::NOT_FOUND, Some("not_found"))
+    );
+    for uri in ["/v1/jobs/999", "/v1/jobs/x"] {
+        let (status, _) = app.router.answer("DELETE", uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+/// Every other kind of job keeps today's behavior: it cannot be cancelled.
+#[tokio::test]
+async fn another_kind_of_job_is_not_cancellable() {
+    use marsa_core::types::{JobEvent, JobKind, JobStep, JobUpdate};
+
+    let app = App::new();
+    let running = JobEvent {
+        id: 41,
+        kind: JobKind::Setup,
+        update: JobUpdate::Running {
+            step: JobStep::Started,
+        },
+    };
+    app.daemon.jobs().record(&running);
+    let (status, json) = app.router.answer("DELETE", "/v1/jobs/41", None).await;
+    assert_eq!(
+        (status, json["error"]["code"].as_str()),
+        (StatusCode::CONFLICT, Some("job_not_cancellable"))
+    );
+    let (_, event) = app.router.answer("GET", "/v1/jobs/41", None).await;
+    assert_eq!(event["status"], "running");
+}
+
+#[tokio::test]
+async fn close_cancels_a_running_statement() {
+    let app = App::new();
+    make_file(&app.site("blog").await, POSTS).await;
+    let id = start(&app, LONG).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    app.router.send("POST", "/v1/db/close", None).await;
+    let event = ended(&app, id).await;
+    assert_eq!(event["code"], "db_query_cancelled", "{event}");
+}

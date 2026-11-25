@@ -226,6 +226,29 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.5
 done
 [ "$(tcp -e "$others")" = 0 ] || fail "a browser connection stayed open after close"
+# The user's SQL: a job whose rows are read once, a write the engine
+# refuses, and a cancel that stops the statement inside the server.
+app='{"kind": "server", "server": "mysql", "database": "app"}'
+id=$(api_query "$app" "SELECT id, body FROM posts ORDER BY id")
+[ "$(api_job_end "$id" | jq -r .status)" = done ] || fail "query $id"
+result=$(api_ok GET "/v1/db/results/$id")
+[ "$(jq -c .rows <<<"$result")" = '[["1","مرحبا بالعالم"],["2","hello world"]]' ] || fail "result: $result"
+id=$(api_query "$app" "INSERT INTO posts (body) VALUES ('x')")
+end=$(api_job_end "$id")
+[ "$(jq -r .code <<<"$end")" = db_read_only ] || fail "a write: $end"
+[ "$(tcp app -e 'select count(*) from posts')" = 2 ] || fail "the write went through"
+id=$(api_query "$app" "SELECT SLEEP(30)")
+sleep 1
+api_ok DELETE "/v1/jobs/$id" >/dev/null
+[ "$(api_job_end "$id" | jq -r .code)" = db_query_cancelled ] || fail "the cancel"
+sleeping="select count(*) from information_schema.processlist where info like 'SELECT SLEEP%'"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ "$(tcp -e "$sleeping")" = 0 ] && break
+  sleep 0.3
+done
+[ "$(tcp -e "$sleeping")" = 0 ] || fail "the cancelled statement still runs in MySQL"
+# Closes what the query step opened, so the next sign-in is a new one.
+api_ok POST /v1/db/close >/dev/null
 # root over TCP with a password: the browser says so, and asks nothing else.
 sock -e "alter user 'root'@'127.0.0.1' identified by 'e2e-secret'"
 problem=$(api_ok GET /v1/db/sources | jq -r '.servers[] | select(.server == "mysql") | .problem')

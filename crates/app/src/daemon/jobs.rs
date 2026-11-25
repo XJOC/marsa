@@ -7,6 +7,7 @@
 //! | --- | --- |
 //! | `GET /v1/jobs` | `JobList`: the jobs that run now |
 //! | `GET /v1/jobs/{id}` | `JobEvent`: the last event of a running job, or of one of the last 16 that ended; 404 for any other |
+//! | `DELETE /v1/jobs/{id}` | `202`: a running `db_query` job is cancelled (ADR 0028); 409 `job_not_cancellable` for any other kind; 404 if it does not run |
 //!
 //! The table lives in memory: a restart of the daemon empties it. It holds
 //! reports, never the token.
@@ -173,11 +174,11 @@ pub(super) async fn answer<T: Serialize>(
     result.map(Json)
 }
 
-/// `GET /v1/jobs` and `GET /v1/jobs/{id}`.
+/// `GET /v1/jobs`, `GET /v1/jobs/{id}`, and `DELETE /v1/jobs/{id}`.
 pub fn routes() -> Router<Arc<Daemon>> {
     Router::new()
         .route("/v1/jobs", get(list))
-        .route("/v1/jobs/{id}", get(one))
+        .route("/v1/jobs/{id}", get(one).delete(cancel))
 }
 
 async fn list(State(daemon): State<Arc<Daemon>>) -> Json<JobList> {
@@ -195,6 +196,33 @@ async fn one(
     // A name that is not a number is no job.
     let id: u64 = id.parse().map_err(|_| not_found())?;
     daemon.jobs().get(id).map(Json).ok_or_else(not_found)
+}
+
+/// Only a statement of the database browser's user can be cancelled: the
+/// other jobs change the system, and stopping one half way could leave it
+/// half changed.
+async fn cancel(
+    State(daemon): State<Arc<Daemon>>,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<StatusCode, HttpError> {
+    let Path(id) = path.map_err(|err| err.reject(codes::INVALID_PATH))?;
+    let not_running =
+        || HttpError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND, "no such job runs");
+    let id: u64 = id.parse().map_err(|_| not_running())?;
+    let event = daemon
+        .jobs()
+        .get(id)
+        .filter(|event| !event.is_last())
+        .ok_or_else(not_running)?;
+    if event.kind != JobKind::DbQuery {
+        return Err(HttpError::new(
+            StatusCode::CONFLICT,
+            codes::JOB_NOT_CANCELLABLE,
+            "only a running SQL statement can be cancelled",
+        ));
+    }
+    crate::daemon::db_browser::cancel_query(&daemon, id);
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[cfg(test)]
