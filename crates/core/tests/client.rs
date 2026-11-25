@@ -2046,3 +2046,81 @@ fn futures_and_streams_are_send() {
     is_send_type::<DaemonClient>();
     is_send_type::<EventStream<Event>>();
 }
+
+/// A statement's job, done, with the rows it kept.
+fn query_done(id: u64) -> JobEvent {
+    JobEvent {
+        id,
+        kind: JobKind::DbQuery,
+        update: JobUpdate::Done(JobOutcome::DbQuery(marsa_core::types::DbQueryDone {
+            columns: Vec::new(),
+            rows: 1,
+            cut: false,
+            elapsed_ms: 4,
+        })),
+    }
+}
+
+/// The fake daemon of [`job_router`], that also starts a statement as job 1
+/// and gives its rows.
+fn query_router(streams: Vec<Vec<Event>>, current: Option<JobEvent>) -> Router {
+    let rows = marsa_core::types::DbResult {
+        columns: Vec::new(),
+        rows: vec![vec![marsa_core::types::DbCell::Text("1".into())]],
+        cut: false,
+        elapsed_ms: 4,
+    };
+    job_router(streams, current)
+        .route(
+            "/v1/jobs/db/query",
+            post(|| async { (StatusCode::ACCEPTED, Json(JobAccepted { id: 1 })) }),
+        )
+        .route(
+            "/v1/db/results/{id}",
+            get(move || {
+                let rows = rows.clone();
+                async move { Json(rows) }
+            }),
+        )
+}
+
+fn select_one() -> marsa_core::types::DbQueryRequest {
+    marsa_core::types::DbQueryRequest {
+        source: "mysql/shop".parse().expect("a source"),
+        sql: "select 1".into(),
+    }
+}
+
+/// The window starts a statement, may cancel it by its id, and waits for its
+/// rows apart. A statement that ended before the wait began is found by
+/// asking for the job first.
+#[tokio::test]
+async fn a_statement_starts_at_once_and_its_rows_come_after_even_if_it_already_ended() {
+    let fake = Fake::start(query_router(vec![Vec::new()], Some(query_done(1)))).await;
+    let client = fake.client();
+    let id = client.start_db_query(&select_one()).await.expect("started");
+    assert_eq!(id, 1);
+    let result = client.db_query_result(id).await.expect("its rows");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        fake.targets(),
+        [
+            "POST /v1/jobs/db/query",
+            "GET /v1/events",
+            "GET /v1/jobs/1",
+            "GET /v1/db/results/1"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn the_wait_for_a_running_statement_follows_its_events() {
+    let mut running = query_done(1);
+    running.update = JobUpdate::Running {
+        step: JobStep::Started,
+    };
+    let events = vec![Event::Job(query_done(1))];
+    let fake = Fake::start(query_router(vec![events], Some(running))).await;
+    let result = fake.client().db_query_result(1).await.expect("its rows");
+    assert_eq!(result.elapsed_ms, 4);
+}

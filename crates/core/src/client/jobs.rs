@@ -217,12 +217,58 @@ impl DaemonClient {
         // An id that cannot be a path segment is refused before any request.
         self.url(segments)?;
         // Open before the start, so no event of this job is missed.
-        let mut stream = self.events().await?;
+        let stream = self.events().await?;
         let accepted: JobAccepted = match body {
             Some(body) => self.call_with(Method::POST, segments, body).await?,
             None => self.call(Method::POST, segments).await?,
         };
         let id = accepted.id;
+        self.follow(stream, id, lost, cancel_after)
+            .await
+            .map(|outcome| (id, outcome))
+    }
+
+    /// `POST` to `segments` with `body`: the started job's id, at once. The
+    /// caller follows it with [`Self::follow_job`] and may cancel it in the
+    /// meantime.
+    pub(super) async fn start_job<B: serde::Serialize>(
+        &self,
+        segments: &[&str],
+        body: &B,
+    ) -> Result<u64, ClientError> {
+        let accepted: JobAccepted = self.call_with(Method::POST, segments, body).await?;
+        Ok(accepted.id)
+    }
+
+    /// Follows job `id`, started earlier, to its end. Its end may have come
+    /// before the stream opened: the job is asked for once first.
+    pub(super) async fn follow_job(
+        &self,
+        id: u64,
+        lost: &'static str,
+    ) -> Result<JobOutcome, ClientError> {
+        let stream = self.events().await?;
+        match self.job(id).await {
+            Ok(event) => {
+                if let Some(end) = ended(event) {
+                    return end;
+                }
+            }
+            Err(ClientError::Api { status: 404, .. }) => return Err(lost_job(lost)),
+            Err(err) => return Err(err),
+        }
+        self.follow(stream, id, lost, None).await
+    }
+
+    /// Reads `stream` until job `id` ends; with `cancel_after`, cancels it
+    /// once that time passed.
+    async fn follow(
+        &self,
+        mut stream: super::EventStream<Event>,
+        id: u64,
+        lost: &'static str,
+        cancel_after: Option<std::time::Duration>,
+    ) -> Result<JobOutcome, ClientError> {
         let mut resyncs = 0;
         let mut deadline = cancel_after.map(|after| tokio::time::Instant::now() + after);
         loop {
@@ -241,7 +287,7 @@ impl DaemonClient {
                 Some(Ok(StreamItem::Item(Event::Job(event)))) if event.id == id => {
                     resyncs = 0;
                     if let Some(end) = ended(event) {
-                        return end.map(|outcome| (id, outcome));
+                        return end;
                     }
                 }
                 // The daemon is stopping, and the job stops with it.
@@ -254,7 +300,7 @@ impl DaemonClient {
                 Some(Err(ClientError::BadResponse { .. })) => match self.job(id).await {
                     Ok(event) => {
                         if let Some(end) = ended(event) {
-                            return end.map(|outcome| (id, outcome));
+                            return end;
                         }
                     }
                     Err(err @ ClientError::BadResponse { .. }) => return Err(err),
@@ -283,7 +329,7 @@ impl DaemonClient {
                     match self.job(id).await {
                         Ok(event) => {
                             if let Some(end) = ended(event) {
-                                return end.map(|outcome| (id, outcome));
+                                return end;
                             }
                         }
                         // The daemon restarted with the same token: the

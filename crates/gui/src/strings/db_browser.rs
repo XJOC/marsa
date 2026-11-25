@@ -222,3 +222,67 @@ pub fn key_name(key: marsa_core::types::DbKey) -> &'static str {
         marsa_core::types::DbKey::Unique => "Unique",
     }
 }
+
+/// The header's switch between a source's tables and its SQL.
+pub const DB_VIEW_LABEL: &str = "View";
+pub const DB_TABLES_VIEW: &str = "Tables";
+pub const DB_SQL_VIEW: &str = "SQL";
+
+/// What a screen reader says for the editor.
+pub const DB_EDITOR: &str = "SQL";
+
+/// The run bar.
+pub const DB_RUN: &str = "Run";
+pub const DB_CANCEL: &str = "Cancel";
+pub const DB_READ_ONLY_TAG: &str = "Read-only";
+
+/// The run bar's hint: Cmd on macOS, Ctrl elsewhere.
+pub fn run_hint(mac: bool) -> &'static str {
+    if mac {
+        "Cmd+Enter runs the statement at the cursor."
+    } else {
+        "Ctrl+Enter runs the statement at the cursor."
+    }
+}
+
+/// "8 rows in 4 ms", "1 row in 0 ms".
+pub fn rows_in(rows: usize, ms: u64) -> String {
+    let word = if rows == 1 { "row" } else { "rows" };
+    format!("{} {word} in {ms} ms", grouped(rows as u64))
+}
+
+/// "Running for 12 s…": changes once a second.
+pub fn running_for(seconds: u64) -> String {
+    format!("Running for {seconds} s…")
+}
+
+/// A statement past the daemon's time limit.
+pub const DB_QUERY_TIMEOUT: &str = "The statement ran longer than 5 minutes and was stopped.";
+
+/// A cancelled statement: in the run bar, not an error.
+pub const DB_CANCELLED: &str = "Cancelled.";
+
+/// While a statement runs, where its rows will be.
+pub const DB_ROWS_LATER: &str = "The rows show here when the statement ends.";
+
+/// Under a result cut at 1,000 rows (or 8 MB).
+pub const DB_RESULT_CUT: &str = "The first 1,000 rows. Add LIMIT or WHERE to see the others.";
+
+/// A statement with no rows.
+pub const DB_DONE_NO_ROWS: &str = "Done. No rows.";
+
+/// The banner's sentence over the server's own words: "MySQL did not run
+/// the statement."
+pub fn query_failed(source: &DbSource) -> String {
+    let name = match source {
+        DbSource::Server { server, .. } => server_name(*server),
+        DbSource::SiteFile { .. } => "SQLite",
+    };
+    format!("{name} did not run the statement.")
+}
+
+/// A paste past the limit, refused.
+pub fn sql_too_long() -> String {
+    let kib = marsa_core::db_browser::SQL_BYTES / 1024;
+    format!("The text is limited to {kib} KB. The paste was not added.")
+}

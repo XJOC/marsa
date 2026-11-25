@@ -9,7 +9,7 @@ use marsa_core::types::{
 };
 
 use super::Demo;
-use crate::model::{DbTab, Model, OpenTable, Route};
+use crate::model::{DbBrowserState, DbTab, DbView, Model, OpenTable, QueryRun, QueryState, Route};
 
 pub(super) fn fill(model: &mut Model, demo: Demo) {
     model.route = Route::Databases;
@@ -71,6 +71,7 @@ pub(super) fn fill(model: &mut Model, demo: Demo) {
             table("users", DbTableKind::Table, Some(1_250_000)),
         ],
     });
+    sql(db, demo);
     if matches!(demo, Demo::DatabasesRows | Demo::DatabasesColumns) {
         let mut open = users_open();
         if demo == Demo::DatabasesColumns {
@@ -176,4 +177,72 @@ fn users_columns() -> DbTable {
             column("created_at", "timestamp", true, None, None),
         ],
     }
+}
+
+/// The SQL view of `shop`: the orders of a week, as rows, as a statement
+/// still running, or as one MySQL refused.
+fn sql(db: &mut DbBrowserState, demo: Demo) {
+    let state = match demo {
+        Demo::DatabasesSql => {
+            let column = |name: &str, kind| DbPageColumn {
+                name: name.into(),
+                kind,
+            };
+            let rows = (0..8_u32)
+                .map(|n| {
+                    vec![
+                        DbCell::Text((1041 + n).to_string()),
+                        DbCell::Text(
+                            ["Omar Haddad", "Lina Saleh", "Sam Carter", "Noor Aziz"]
+                                [n as usize % 4]
+                                .into(),
+                        ),
+                        DbCell::Text(format!("{}.{:02}", 40 + n * 13, n * 7 % 100)),
+                        DbCell::Text(format!("2026-11-{:02} 10:{:02}:00", 18 + n % 7, n * 7)),
+                    ]
+                })
+                .collect();
+            QueryState::Done(marsa_core::types::DbResult {
+                columns: vec![
+                    column("id", DbColumnKind::Number),
+                    column("customer", DbColumnKind::Text),
+                    column("total", DbColumnKind::Number),
+                    column("created_at", DbColumnKind::Time),
+                ],
+                rows,
+                cut: false,
+                elapsed_ms: 4,
+            })
+        }
+        Demo::DatabasesSqlRunning => QueryState::Running,
+        Demo::DatabasesSqlRefused => QueryState::Failed {
+            code: marsa_core::codes::DB_QUERY_FAILED.into(),
+            detail: Some(
+                "You have an error in your SQL syntax; check the manual that corresponds to \
+                 your MySQL server version for the right syntax to use near 'FORM orders o\n\
+                 JOIN users u ON u.id = o.user_id' at line 3"
+                    .into(),
+            ),
+        },
+        _ => return,
+    };
+    db.view = DbView::Sql;
+    let refused = demo == Demo::DatabasesSqlRefused;
+    db.demo_sql = Some(format!(
+        "-- The orders of the last week, newest first.\n\
+         SELECT o.id, u.name AS customer, o.total, o.created_at\n\
+         {} orders o\n\
+         JOIN users u ON u.id = o.user_id\n\
+         WHERE o.created_at > '2026-11-18'\n\
+         ORDER BY o.created_at DESC;",
+        if refused { "FORM" } else { "FROM" }
+    ));
+    let started = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(12))
+        .unwrap_or_else(std::time::Instant::now);
+    db.query = Some(QueryRun {
+        started,
+        job: Some(1),
+        state,
+    });
 }

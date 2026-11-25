@@ -117,6 +117,36 @@ impl DaemonClient {
         Ok((id, result))
     }
 
+    /// `POST /v1/jobs/db/query`: starts the statement and gives the job's
+    /// id at once, so the caller can cancel it ([`Self::cancel_job`]) while
+    /// [`Self::db_query_result`] waits. The window runs a statement this way.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `db_one_statement` and `db_sql_too_long` (400),
+    /// `db_busy` (409).
+    pub async fn start_db_query(&self, request: &DbQueryRequest) -> Result<u64, ClientError> {
+        self.start_job(&["v1", "jobs", "db", "query"], request)
+            .await
+    }
+
+    /// Follows the statement job `id` to its end, then reads its rows.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_db_query`]: the job's own failure (`db_read_only`,
+    /// `db_query_failed`, `db_timeout`, `db_query_cancelled`), or
+    /// `db_result_gone`.
+    pub async fn db_query_result(&self, id: u64) -> Result<DbResult, ClientError> {
+        let JobOutcome::DbQuery(_) = self.follow_job(id, codes::DB_RESULT_GONE).await? else {
+            return Err(ClientError::bad_response(
+                "the job ended with the result of another kind of job",
+            ));
+        };
+        self.call(Method::GET, &["v1", "db", "results", &id.to_string()])
+            .await
+    }
+
     /// `POST /v1/db/close`: every connection of the browser closes. The window
     /// sends it when the user leaves the screen.
     ///

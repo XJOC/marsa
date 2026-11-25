@@ -14,12 +14,13 @@ use eframe::egui::{
 use marsa_core::types::{DbServer, DbSource, DbTableKind, DbTableRef, ServiceAction, ServiceId};
 
 use super::lines::{message, state};
-use crate::model::{Action, DbAction, DbScreen, DbTab, Model, OpenTable};
+use crate::model::{Action, DbAction, DbScreen, DbTab, DbView, Model, OpenTable, QueryRun};
 use crate::strings;
 use crate::theme::page::{DB_DETAIL_END, DB_LIST_END, DB_LIST_WIDTH};
 use crate::theme::{Direction, Section, Theme};
 use crate::widgets::list_item;
 use crate::widgets::menu::{Item as MenuItem, Menu};
+use crate::widgets::segmented::Segmented;
 use crate::widgets::table::card;
 use crate::widgets::tabs::Tabs;
 use crate::widgets::{Button, Field, Text};
@@ -31,6 +32,8 @@ pub(crate) struct DatabasesView<'a> {
     pub label: String,
     /// The menu's rows.
     pub choices: Vec<(Choice, String)>,
+    /// The switch between the tables and SQL, once a source's tables show.
+    pub switch: Option<DbView>,
     pub body: Body<'a>,
 }
 
@@ -55,6 +58,7 @@ pub(crate) enum Body<'a> {
 
 mod columns;
 mod rows;
+mod sql;
 
 /// Refresh: F5, or Cmd R on macOS and Ctrl R elsewhere.
 const REFRESH_KEYS: [KeyboardShortcut; 2] = [
@@ -64,6 +68,12 @@ const REFRESH_KEYS: [KeyboardShortcut; 2] = [
 
 pub(crate) struct Tables<'a> {
     pub filter: &'a str,
+    /// The chosen source, its view, and its last statement.
+    pub source: Option<&'a DbSource>,
+    pub view: DbView,
+    pub query: Option<&'a QueryRun>,
+    /// The demo's SQL text, if any.
+    pub seed: Option<&'a str>,
     /// The table chosen in the list, opened in the detail.
     pub open: Option<&'a OpenTable>,
     /// The tables after the filter.
@@ -124,9 +134,11 @@ pub(crate) fn view(model: &Model) -> DatabasesView<'_> {
             DbScreen::Tables => Body::Tables(tables(model)),
         }
     };
+    let switch = matches!(body, Body::Tables(_)).then_some(db.view);
     DatabasesView {
         label,
         choices,
+        switch,
         body,
     }
 }
@@ -153,6 +165,10 @@ fn tables(model: &Model) -> Tables<'_> {
         .flatten();
     Tables {
         filter: &db.filter,
+        source: db.chosen.as_ref(),
+        view: db.view,
+        query: db.query.as_ref(),
+        seed: seed(db),
         open: db.open.as_ref(),
         rows,
         none,
@@ -166,6 +182,18 @@ pub(crate) fn show(ui: &mut Ui, view: &DatabasesView<'_>, theme: &Theme) -> Vec<
     super::header(ui, theme, Section::Databases, title, |ui| {
         if view.choices.is_empty() {
             return;
+        }
+        if let Some(chosen) = view.switch {
+            let views = [
+                (DbView::Tables, strings::DB_TABLES_VIEW),
+                (DbView::Sql, strings::DB_SQL_VIEW),
+            ];
+            if let Some(next) = Segmented::new(strings::DB_VIEW_LABEL, &views, chosen)
+                .show(ui)
+                .inner
+            {
+                actions.push(Action::Db(DbAction::View(next)));
+            }
         }
         let button = ui.add(Button::secondary(&view.label));
         let items: Vec<MenuItem<'_, usize>> = view
@@ -219,6 +247,17 @@ pub(crate) fn show(ui: &mut Ui, view: &DatabasesView<'_>, theme: &Theme) -> Vec<
     actions
 }
 
+/// The demo's SQL text: review aids build in debug only.
+fn seed(db: &crate::model::DbBrowserState) -> Option<&str> {
+    #[cfg(debug_assertions)]
+    return db.demo_sql.as_deref();
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = db;
+        None
+    }
+}
+
 fn start(server: DbServer) -> Action {
     Action::Service {
         service: ServiceId::Database(server.kind()),
@@ -237,9 +276,14 @@ fn split(ui: &mut Ui, theme: &Theme, tables: &Tables<'_>, actions: &mut Vec<Acti
             list(ui, theme, tables, actions);
         });
         let rest = vec2(ui.available_width(), height);
-        ui.allocate_ui_with_layout(rest, column, |ui| match tables.open {
-            Some(open) => table_view(ui, theme, open, actions),
-            None => detail(ui, theme, tables),
+        ui.allocate_ui_with_layout(rest, column, |ui| {
+            match (tables.view, tables.source, tables.open) {
+                (DbView::Sql, Some(source), _) => {
+                    sql::show(ui, theme, source, tables.query, tables.seed, actions);
+                }
+                (_, _, Some(open)) => table_view(ui, theme, open, actions),
+                _ => detail(ui, theme, tables),
+            }
         });
     });
 }
