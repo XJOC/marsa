@@ -5,8 +5,11 @@
 //! tokio channel. [`DaemonClient`] never leaves this module, so the token
 //! never reaches the drawing code (architecture.md section 3).
 
+mod db_browser;
 mod dumps;
 mod mail;
+
+pub use db_browser::{DbCommand, DbUpdate};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, mpsc};
@@ -72,6 +75,8 @@ pub enum Command {
     ClearDumps,
     /// The switch "Capture" on Dumps: on or off.
     SetDumpsCapture(bool),
+    /// A read of the Databases screen, or its close.
+    Db(DbCommand),
 }
 
 /// The window's end of the bridge.
@@ -493,6 +498,7 @@ fn run_command(
                     .err()
                     .map(|err| notice(&format!("cannot {action} {service}"), &err))
             }
+            Command::Db(command) => db_browser::run(&client, command).await,
             Command::Park(folder) => Some(match client.park(&folder).await {
                 Ok(_) => {
                     tracing::info!(folder = %folder.display(), "folder parked");

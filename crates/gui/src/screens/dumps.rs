@@ -18,14 +18,14 @@
 use std::sync::Arc;
 
 use eframe::egui::{
-    Align, Id, Label, Rect, RichText, ScrollArea, Sense, TextWrapMode, Ui, UiBuilder, Vec2, vec2,
+    Id, Label, Rect, RichText, ScrollArea, Sense, TextWrapMode, Ui, UiBuilder, Vec2, vec2,
 };
 use marsa_core::types::{Dump, DumpsStatus, MAX_KEPT_DUMPS};
 
-use super::lines::message;
+use super::lines::{message, state};
 use crate::model::{Action, DumpsState, Model};
 use crate::strings;
-use crate::theme::page::{DUMPS_FACT_LABEL, DUMPS_LIST_WIDTH, DUMPS_STATE_WIDTH};
+use crate::theme::page::{DUMPS_FACT_LABEL, DUMPS_LIST_WIDTH};
 use crate::theme::{Direction, Section, Theme};
 use crate::widgets::panel::divider;
 use crate::widgets::table::{card, padded_card};
@@ -263,44 +263,6 @@ pub(crate) fn show(ui: &mut Ui, view: &DumpsView<'_>, theme: &Theme) -> Vec<Acti
         Body::List(listed) => split(ui, theme, listed, &mut actions),
     }
     actions
-}
-
-/// A card that fills the height left, with a sentence, a caption under it,
-/// and the button of the fix if there is one, in the middle. Returns
-/// whether the button was pressed.
-fn state(
-    ui: &mut Ui,
-    theme: &Theme,
-    sentence: &str,
-    how: &str,
-    button: Option<Button<'_>>,
-) -> bool {
-    use eframe::egui::text::LayoutJob;
-    card(ui, |ui| {
-        let room = ui.available_height();
-        ui.set_min_height(room);
-        let width = ui.available_width().min(DUMPS_STATE_WIDTH);
-        // Laid out first, to center the block on the card's height.
-        let centered = |text: &str, font, color| {
-            let mut job = LayoutJob::simple(text.to_owned(), font, color, width);
-            job.halign = Align::Center;
-            ui.painter().layout_job(job)
-        };
-        let first = centered(sentence, theme.text.body.font_id(), theme.color.ink);
-        let second = centered(how, theme.text.body_sm.font_id(), theme.color.mute);
-        let gap = theme.space.s3;
-        let fix = button.as_ref().map_or(0.0, |_| gap + theme.size.control);
-        let block = first.size().y + gap + second.size().y + fix;
-        ui.vertical_centered(|ui| {
-            ui.spacing_mut().item_spacing.y = gap;
-            ui.add_space(0.0_f32.midpoint(room - block).max(theme.space.s6));
-            ui.add(Label::new(first).selectable(false));
-            ui.add(Label::new(second).selectable(false));
-            button.is_some_and(|button| ui.add(button).clicked())
-        })
-        .inner
-    })
-    .inner
 }
 
 /// The list on the start side, the shown dump on the end side: both as high

@@ -15,6 +15,8 @@ use crate::widgets::{Button, Health, Icon, NavItem, StatusDot};
 pub(crate) enum Item {
     Home,
     Sites,
+    /// Only while something could be opened ([`Model::has_databases`]).
+    Databases,
     /// Only while Mailpit is installed ([`Item::shown`]).
     Mail,
     Dumps,
@@ -28,7 +30,7 @@ pub(crate) enum Item {
 /// The items above the status, in their groups, in order.
 pub(crate) const GROUPS: [&[Item]; 4] = [
     &[Item::Home],
-    &[Item::Sites],
+    &[Item::Sites, Item::Databases],
     &[Item::Mail, Item::Dumps, Item::Logs],
     &[Item::Runtimes, Item::Services],
 ];
@@ -41,6 +43,7 @@ impl Item {
         match self {
             Self::Home => Route::Home,
             Self::Sites => Route::Sites,
+            Self::Databases => Route::Databases,
             Self::Mail => Route::Mail,
             Self::Dumps => Route::Dumps,
             Self::Logs => Route::Logs(LogSource::default()),
@@ -64,6 +67,7 @@ impl Item {
         match route {
             Route::Home => Self::Home,
             Route::Sites | Route::Site(_) => Self::Sites,
+            Route::Databases => Self::Databases,
             Route::Mail => Self::Mail,
             Route::Dumps => Self::Dumps,
             Route::Logs(_) => Self::Logs,
@@ -78,6 +82,7 @@ impl Item {
         match self {
             Self::Home => Some(Section::Home),
             Self::Sites => Some(Section::Sites),
+            Self::Databases => Some(Section::Databases),
             Self::Mail => Some(Section::Mail),
             Self::Dumps => Some(Section::Dumps),
             Self::Logs => Some(Section::Logs),
@@ -92,6 +97,7 @@ impl Item {
     pub(crate) fn shown(self, model: &Model) -> bool {
         match self {
             Self::Mail => model.has_mailpit(),
+            Self::Databases => model.has_databases(),
             _ => true,
         }
     }
@@ -307,6 +313,7 @@ mod tests {
             [
                 Item::Home,
                 Item::Sites,
+                Item::Databases,
                 Item::Mail,
                 Item::Dumps,
                 Item::Logs,
