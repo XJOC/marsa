@@ -12,8 +12,18 @@ use marsa_core::types::{DbServer, DbSource, DbSources, DbTables};
 use super::*;
 use crate::bridge::{DbCommand, DbUpdate};
 
+mod query;
 mod table;
+pub use query::{QueryRun, QueryState};
 pub use table::{DbAction, DbTab, OpenTable, PaneValue};
+
+/// The detail of the screen: a source's tables, or its SQL.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DbView {
+    #[default]
+    Tables,
+    Sql,
+}
 
 /// What the window knows of the databases. Part of the [`Session`]: a new
 /// connection reads them again.
@@ -32,6 +42,15 @@ pub struct DbBrowserState {
     pub error: Option<String>,
     /// The table the user opened, of `chosen`.
     pub open: Option<OpenTable>,
+    /// Tables, or SQL.
+    pub view: DbView,
+    /// The statement the user ran last, and its rows.
+    pub query: Option<QueryRun>,
+    /// The demo's SQL text, for the editor's first showing (review aids
+    /// build in debug only).
+    #[cfg(debug_assertions)]
+    pub demo_sql: Option<String>,
+    query_id: Option<u64>,
     last_id: u64,
     sources_id: Option<u64>,
     tables_id: Option<u64>,
@@ -197,6 +216,9 @@ impl Model {
         db.rows_id = None;
         db.value_id = None;
         db.table_id = None;
+        // The close cancels a statement still running.
+        db.query = None;
+        db.query_id = None;
         if let Some(open) = db.open.as_mut() {
             // The table and its sort stay; what was read goes.
             *open = OpenTable {
@@ -216,6 +238,8 @@ impl Model {
         }
         if db.chosen.as_ref() != Some(&source) {
             db.open = None;
+            db.query = None;
+            db.query_id = None;
         }
         db.chosen = Some(source.clone());
         db.tables = None;
@@ -257,6 +281,9 @@ impl Model {
                     }
                     Err(code) => db.error = Some(code),
                 }
+            }
+            update @ (DbUpdate::QueryStarted { .. } | DbUpdate::Query { .. }) => {
+                self.db_query_update(update);
             }
             update => self.db_table_update(update),
         }

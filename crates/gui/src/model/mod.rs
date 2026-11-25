@@ -31,7 +31,9 @@ mod session;
 mod setup;
 mod sites;
 
-pub use db_browser::{DbAction, DbBrowserState, DbScreen, DbTab, OpenTable, PaneValue};
+pub use db_browser::{
+    DbAction, DbBrowserState, DbScreen, DbTab, DbView, OpenTable, PaneValue, QueryRun, QueryState,
+};
 pub use dumps::DumpsState;
 use installs::Install;
 pub use installs::{InstallJob, InstallStep, InstallView, install_version};

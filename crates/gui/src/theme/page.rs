@@ -74,6 +74,8 @@ pub const DB_LIST_END: f32 = 64.0;
 pub const DB_DETAIL_END: f32 = 180.0;
 /// The value pane under the grid (layout.md, "Tables view, a table chosen").
 pub const DB_VALUE_HEIGHT: f32 = 128.0;
+/// The SQL editor's height, in lines (layout.md, "SQL view").
+pub const SQL_EDITOR_LINES: usize = 10;
 /// The Columns tab's fixed columns: the type, Null (Yes, No), the key tag.
 pub const DB_COLUMN_TYPE: f32 = 160.0;
 pub const DB_COLUMN_NULL: f32 = 72.0;

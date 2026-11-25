@@ -498,7 +498,7 @@ fn run_command(
                     .err()
                     .map(|err| notice(&format!("cannot {action} {service}"), &err))
             }
-            Command::Db(command) => db_browser::run(&client, command).await,
+            Command::Db(command) => db_browser::run(&client, command, &window).await,
             Command::Park(folder) => Some(match client.park(&folder).await {
                 Ok(_) => {
                     tracing::info!(folder = %folder.display(), "folder parked");

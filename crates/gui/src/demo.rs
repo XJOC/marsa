@@ -103,6 +103,10 @@ pub enum Demo {
     DatabasesRows,
     /// `DatabasesRows` on the Columns tab.
     DatabasesColumns,
+    /// Databases on SQL: a statement's rows; one running; one refused.
+    DatabasesSql,
+    DatabasesSqlRunning,
+    DatabasesSqlRefused,
     /// The same as `Ok`, with six dumps, four of them new, the newest shown.
     Dumps,
     /// `Dumps` with the capture on and nothing caught yet.
@@ -157,6 +161,9 @@ fn parse(name: &str) -> Option<Demo> {
         "databases-stopped" => Demo::DatabasesStopped,
         "databases-rows" => Demo::DatabasesRows,
         "databases-columns" => Demo::DatabasesColumns,
+        "databases-sql" => Demo::DatabasesSql,
+        "databases-sql-running" => Demo::DatabasesSqlRunning,
+        "databases-sql-refused" => Demo::DatabasesSqlRefused,
         "confirm-delete-mail" => Demo::ConfirmDeleteMail,
         "dumps" => Demo::Dumps,
         "dumps-empty" => Demo::DumpsEmpty,
@@ -256,7 +263,13 @@ pub fn fill(model: &mut Model, demo: Demo) {
     }
     if matches!(
         demo,
-        Demo::Databases | Demo::DatabasesStopped | Demo::DatabasesRows | Demo::DatabasesColumns
+        Demo::Databases
+            | Demo::DatabasesStopped
+            | Demo::DatabasesRows
+            | Demo::DatabasesColumns
+            | Demo::DatabasesSql
+            | Demo::DatabasesSqlRunning
+            | Demo::DatabasesSqlRefused
     ) {
         databases::fill(model, demo);
     }

@@ -35,6 +35,12 @@ pub enum DbAction {
     PreviousPage,
     /// The page and its count, or the columns, are read again.
     Refresh,
+    /// "Tables" or "SQL" in the header.
+    View(super::DbView),
+    /// "Run", or Cmd or Ctrl Enter: this statement, for the chosen source.
+    Run(String),
+    /// "Cancel", or Esc in the editor.
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -175,6 +181,12 @@ impl Model {
                 None
             }
             DbAction::Copy => None,
+            DbAction::View(view) => {
+                self.db_view(view);
+                None
+            }
+            DbAction::Run(sql) => self.run_db_query(sql),
+            DbAction::Cancel => self.cancel_db_query(),
             DbAction::NextPage => {
                 let offset = self.session.db.open.as_ref()?.next_offset()?;
                 self.read_db_rows(offset, false)
@@ -203,6 +215,8 @@ impl Model {
 
     fn choose_db_table(&mut self, table: DbTableRef) -> Option<Command> {
         let db = &mut self.session.db;
+        // A table of the list shows its rows, from the SQL view too.
+        db.view = super::DbView::Tables;
         if db.open.as_ref().is_some_and(|open| open.table == table) {
             return None;
         }

@@ -91,10 +91,12 @@ impl<'a> Grid<'a> {
         let mut events = Vec::new();
         let id = ui.make_persistent_id(self.id_salt);
         let pad = theme.space.s3;
-        let width: f32 = self.widths.iter().sum::<f32>() + pad + pad;
+
         let header = theme.size.table_header;
         let row_height = theme.size.row_dense;
         let area = ui.available_rect_before_wrap();
+        // The lines span the card; the columns may be wider and scroll.
+        let width = (self.widths.iter().sum::<f32>() + pad + pad).max(area.width());
         // The grid's one focus stop, under the rows, which take the clicks.
         let focus = ui.interact(area, id, Sense::click());
         focus.widget_info(|| {

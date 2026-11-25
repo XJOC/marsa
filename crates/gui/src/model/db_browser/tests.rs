@@ -6,6 +6,7 @@ use marsa_core::types::{
 
 use super::*;
 use crate::fixtures::connected;
+use crate::model::QueryState;
 
 fn server(server: DbServer, state: ServiceState, databases: &[&str]) -> DbServerInfo {
     DbServerInfo {
@@ -533,4 +534,150 @@ fn another_source_closes_the_table() {
     table_opened(&mut model);
     model.apply_action(Action::ChooseDbSource(shop()));
     assert!(model.session.db.open.is_none());
+}
+
+fn run(model: &mut Model, sql: &str) -> (u64, marsa_core::types::DbQueryRequest) {
+    match act(model, DbAction::Run(sql.into())) {
+        Some(Command::Db(DbCommand::RunQuery { id, request })) => (id, request),
+        other => panic!("not a run: {other:?}"),
+    }
+}
+
+fn started(model: &mut Model, id: u64, job: u64) {
+    model.update(Update::Db(DbUpdate::QueryStarted {
+        id,
+        result: Ok(job),
+    }));
+}
+
+fn ended(
+    model: &mut Model,
+    id: u64,
+    result: Result<marsa_core::types::DbResult, (String, Option<String>)>,
+) {
+    model.update(Update::Db(DbUpdate::Query { id, result }));
+}
+
+fn state(model: &Model) -> QueryState {
+    model
+        .session
+        .db
+        .query
+        .as_ref()
+        .expect("a run")
+        .state
+        .clone()
+}
+
+fn one_row() -> marsa_core::types::DbResult {
+    marsa_core::types::DbResult {
+        columns: Vec::new(),
+        rows: vec![vec![DbCell::Text("1".into())]],
+        cut: false,
+        elapsed_ms: 4,
+    }
+}
+
+#[test]
+fn a_statement_runs_for_the_chosen_source_one_at_a_time() {
+    let mut model = connected();
+    tables_id(opened(&mut model, sources()));
+    act(&mut model, DbAction::View(DbView::Sql));
+    assert_eq!(model.session.db.view, DbView::Sql);
+    let (id, request) = run(&mut model, "select 1");
+    assert_eq!(request.sql, "select 1");
+    assert_eq!(model.session.db.chosen.as_ref(), Some(&request.source));
+    assert!(
+        act(&mut model, DbAction::Run("select 2".into())).is_none(),
+        "one at a time"
+    );
+    started(&mut model, id, 7);
+    ended(&mut model, id, Ok(one_row()));
+    assert_eq!(state(&model), QueryState::Done(one_row()));
+    // Done: the next one may run.
+    run(&mut model, "select 2");
+    assert!(
+        act(&mut model, DbAction::Run("   ".into())).is_none(),
+        "nothing to run"
+    );
+}
+
+#[test]
+fn cancel_stops_the_job_and_says_cancelled_not_an_error() {
+    let mut model = connected();
+    tables_id(opened(&mut model, sources()));
+    let (id, _) = run(&mut model, "select sleep(60)");
+    started(&mut model, id, 7);
+    assert!(matches!(
+        act(&mut model, DbAction::Cancel),
+        Some(Command::Db(DbCommand::CancelQuery { job: 7 }))
+    ));
+    assert_eq!(state(&model), QueryState::Cancelling);
+    assert!(act(&mut model, DbAction::Cancel).is_none(), "once");
+    let cancelled = (marsa_core::codes::DB_QUERY_CANCELLED.to_owned(), None);
+    ended(&mut model, id, Err(cancelled));
+    assert_eq!(state(&model), QueryState::Cancelled);
+}
+
+#[test]
+fn a_cancel_before_the_job_started_goes_when_its_id_comes() {
+    let mut model = connected();
+    tables_id(opened(&mut model, sources()));
+    let (id, _) = run(&mut model, "select sleep(60)");
+    assert!(act(&mut model, DbAction::Cancel).is_none());
+    started(&mut model, id, 9);
+    assert!(matches!(
+        model.next_command(),
+        Some(Command::Db(DbCommand::CancelQuery { job: 9 }))
+    ));
+}
+
+#[test]
+fn a_refused_statement_keeps_the_servers_words_and_an_old_answer_is_dropped() {
+    let mut model = connected();
+    tables_id(opened(&mut model, sources()));
+    let (id, _) = run(&mut model, "selec 1");
+    let words = Some("You have an error in your SQL syntax".to_owned());
+    ended(&mut model, id + 100, Ok(one_row()));
+    assert_eq!(state(&model), QueryState::Running, "not this run's answer");
+    ended(
+        &mut model,
+        id,
+        Err(("db_query_failed".into(), words.clone())),
+    );
+    assert_eq!(
+        state(&model),
+        QueryState::Failed {
+            code: "db_query_failed".into(),
+            detail: words
+        }
+    );
+}
+
+#[test]
+fn leaving_or_another_source_drops_the_result_and_a_table_goes_back_to_tables() {
+    let mut model = connected();
+    let id = tables_id(opened(&mut model, sources()));
+    model.update(Update::Db(DbUpdate::Tables {
+        id,
+        result: Ok(tables(&["users"])),
+    }));
+    act(&mut model, DbAction::View(DbView::Sql));
+    let (id, _) = run(&mut model, "select 1");
+    ended(&mut model, id, Ok(one_row()));
+    act(&mut model, DbAction::ChooseTable(users()));
+    assert_eq!(model.session.db.view, DbView::Tables);
+    assert!(
+        model.session.db.query.is_some(),
+        "the result stays on the screen"
+    );
+    model.apply_action(Action::Navigate(Route::Mail));
+    assert!(model.session.db.query.is_none());
+    assert_eq!(model.session.db.view, DbView::Tables);
+
+    let mut model = connected();
+    tables_id(opened(&mut model, sources()));
+    run(&mut model, "select 1");
+    model.apply_action(Action::ChooseDbSource(shop()));
+    assert!(model.session.db.query.is_none());
 }

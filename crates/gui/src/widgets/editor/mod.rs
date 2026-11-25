@@ -51,6 +51,9 @@ pub struct Editor<'a> {
     engine: Engine,
     /// How many lines high.
     lines: usize,
+    /// Tells apart the texts of one editor, such as each source's SQL: each
+    /// keeps its own layout.
+    key: u64,
 }
 
 impl<'a> Editor<'a> {
@@ -69,12 +72,19 @@ impl<'a> Editor<'a> {
             buffer,
             engine,
             lines,
+            key: 0,
         }
+    }
+
+    /// One of several texts shown in turn in this editor.
+    pub const fn keyed(mut self, key: u64) -> Self {
+        self.key = key;
+        self
     }
 
     pub fn show(self, ui: &mut Ui) -> EditorOutput {
         let theme = Theme::of(ui.ctx()).clone();
-        let id = ui.make_persistent_id(self.id_salt);
+        let id = ui.make_persistent_id((self.id_salt, self.key));
         let mut cache = ui
             .data_mut(|data| data.remove_temp::<Cache>(id))
             .unwrap_or_default();
@@ -131,6 +141,7 @@ impl<'a> Editor<'a> {
         let moved = cache.cursor != Some(self.buffer.cursor());
         cache.cursor = Some(self.buffer.cursor());
         let mut drawn: Vec<(usize, Rect)> = Vec::new();
+        let mut shown = 0..0;
         let mut caret = None;
         {
             let buffer = &*self.buffer;
@@ -144,6 +155,7 @@ impl<'a> Editor<'a> {
                     buffer.lines().len(),
                     |ui, range| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        shown = range.clone();
                         for line in range {
                             let galley = cache.galley(ui, &theme, buffer, engine, line);
                             let text_width = galley.size().x + theme.size.editor_gutter + pad + pad;
@@ -187,6 +199,7 @@ impl<'a> Editor<'a> {
             }
         }
 
+        cache.keep_only(shown);
         if let Some(caret) = caret {
             let to_global = ui
                 .ctx()
@@ -210,7 +223,7 @@ impl<'a> Editor<'a> {
 /// count them.
 #[cfg(test)]
 fn laid_out(ui: &Ui, id_salt: &'static str) -> u64 {
-    let id = ui.make_persistent_id(id_salt);
+    let id = ui.make_persistent_id((id_salt, 0_u64));
     ui.data(|data| data.get_temp::<Cache>(id))
         .map_or(0, |cache| cache.laid_out)
 }
@@ -298,6 +311,16 @@ impl Cache {
                 self.galleys[line + 1] = None;
             }
             line += 1;
+        }
+    }
+
+    /// Drops the galleys of the lines out of view: the editor's memory is a
+    /// screenful of lines, however far it scrolled.
+    fn keep_only(&mut self, shown: std::ops::Range<usize>) {
+        for (line, galley) in self.galleys.iter_mut().enumerate() {
+            if galley.is_some() && !shown.contains(&line) {
+                *galley = None;
+            }
         }
     }
 
