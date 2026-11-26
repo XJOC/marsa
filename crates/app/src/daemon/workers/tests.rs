@@ -386,21 +386,26 @@ mod real {
         assert!(daemon.workers().statuses().is_empty());
         manager.sync(&daemon, &[on]).await;
         let back = wait_for(&daemon, running).await;
-        // The new run's first line comes a moment after `running`.
+        // The new run's first line comes a moment after `running`. Only its
+        // own line counts: a late line of the old run also has a newer `seq`.
         let runtime = daemon.workers().find(queue()).unwrap();
         let newer = || {
             lock(&runtime)
                 .logs
                 .recent()
                 .iter()
-                .any(|line| line.seq > last)
+                .any(|line| line.seq > last && line.text.contains("artisan queue:work"))
         };
         let waited = tokio::time::timeout(WAIT, async {
             while !newer() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         });
-        assert!(waited.await.is_ok(), "no line after seq {last}");
+        assert!(
+            waited.await.is_ok(),
+            "no new run's line after seq {last} in {}",
+            lines(&daemon)
+        );
         let after = lock(&runtime).logs.recent();
         assert!(after.windows(2).all(|pair| pair[0].seq < pair[1].seq));
         daemon.stop_procs(WAIT).await;
