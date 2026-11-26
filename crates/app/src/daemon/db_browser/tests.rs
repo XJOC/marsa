@@ -834,6 +834,28 @@ async fn a_whole_value_is_read_by_the_rows_key() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// After `close`, the site's SQLite file can be deleted: on Windows an open
+/// handle would refuse it (ADR 0028, "After close"). Elsewhere it shows that
+/// `close` answers once the connection is gone.
+#[tokio::test]
+async fn after_close_the_sqlite_file_can_be_deleted() {
+    let app = App::new();
+    let root = app.site("blog").await;
+    let file = make_file(&root, SHOP).await;
+    let (status, json) = app.tables(blog()).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let response = app.router.send("POST", "/v1/db/close", None).await;
+    assert!(response.status().is_success());
+    fs::remove_file(&file).expect("the file is free after close");
+    for sidecar in ["-wal", "-shm"] {
+        let path = file.with_file_name(format!("database.sqlite{sidecar}"));
+        if path.exists() {
+            fs::remove_file(&path).expect("its sidecar is free too");
+        }
+    }
+    assert!(!file.exists());
+}
+
 #[test]
 fn a_server_connection_keeps_few_prepared_statements() {
     // The driver's options say their cache size only in their `Debug`.

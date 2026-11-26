@@ -15,6 +15,9 @@
 //! `logs` are 0, `scroll` is 0, and `idle` is 60 when left out; with
 //! nothing to list the window opens on Home.
 //!
+//! `table=100000` opens a made-up table of that many rows in Databases and
+//! walks its pages (see `table`).
+//!
 //! `sql=5000,type=200` shows only the SQL editor, with a made-up text of
 //! 5000 lines. After the idle time it clicks into the middle line, types
 //! one character a frame, 200 times, and logs the resident memory before
@@ -35,7 +38,10 @@ use marsa_core::types::{
     RuntimeVersions, ServiceId, ServiceState, ServiceStatus, Site, SiteKind, SiteList, Source,
 };
 
-use crate::model::{LogSource, Model, Route, Update};
+use crate::bridge::Command;
+use crate::model::{Action, DbAction, Effect, LogSource, Model, Route, Update};
+
+mod table;
 use crate::widgets::editor::buffer::{Buffer, Pos};
 
 /// The variable that asks for the mode.
@@ -72,6 +78,9 @@ pub struct Plan {
     pub sql: usize,
     /// How many characters are typed into the editor after the idle time.
     pub typing: u32,
+    /// How many rows the made-up table has; with any, the window opens it
+    /// in Databases and walks its pages.
+    pub table: u64,
 }
 
 /// Why the mode cannot start.
@@ -123,6 +132,7 @@ fn parse(text: &str) -> Option<Plan> {
         scroll: 0,
         sql: 0,
         typing: 0,
+        table: 0,
     };
     for part in text.split(',').filter(|part| !part.trim().is_empty()) {
         let (key, value) = part.split_once('=')?;
@@ -135,6 +145,7 @@ fn parse(text: &str) -> Option<Plan> {
             "scroll" => plan.scroll = u32::try_from(value).ok()?,
             "sql" => plan.sql = usize::try_from(value).ok()?,
             "type" => plan.typing = u32::try_from(value).ok()?,
+            "table" => plan.table = value,
             _ => return None,
         }
     }
@@ -355,8 +366,18 @@ pub struct Run {
     done: bool,
     /// The SQL editor's text, when the plan types into it.
     editor: Option<Buffer>,
-    /// The resident memory when typing began, in KiB.
+    /// The resident memory when typing or the walk began, in KiB.
     rss_before_kib: Option<u64>,
+    /// The most resident memory seen during the walk, in KiB.
+    peak_kib: u64,
+    /// When the window left the screen after the walk, and its memory a
+    /// moment later.
+    left: Option<Instant>,
+    rss_left_kib: Option<u64>,
+    /// An action the run asks the window to do (leave the screen).
+    wanted: Option<Action>,
+    /// The pages the made-up source gave: the walk reached them.
+    pages_read: u64,
 }
 
 impl Run {
@@ -397,6 +418,47 @@ impl Run {
             done: false,
             editor,
             rss_before_kib: None,
+            peak_kib: 0,
+            left: None,
+            rss_left_kib: None,
+            wanted: None,
+            pages_read: 0,
+        }
+    }
+
+    /// The made-up source's answer to `command`, when the plan has one.
+    pub fn answer(&mut self, command: &Command) -> Option<Option<Update>> {
+        let answer = (self.plan.table > 0)
+            .then(|| table::answer(command, self.plan.table))
+            .flatten();
+        if matches!(answer, Some(Some(_))) {
+            self.pages_read += 1;
+        }
+        answer
+    }
+
+    /// What the run asks the window to do now, once.
+    pub fn wanted(&mut self) -> Option<Action> {
+        self.wanted.take()
+    }
+
+    /// The window opens the made-up table, its first page answered at once.
+    pub fn open_table(&mut self, model: &mut Model) {
+        if self.plan.table == 0 {
+            return;
+        }
+        table::fill(model, self.plan.table);
+        let effect = model.apply_action(Action::Db(DbAction::ChooseTable(table::table())));
+        if let Effect::Send(command) = effect
+            && let Some(Some(update)) = self.answer(&command)
+        {
+            model.update(update);
+        }
+    }
+
+    fn sample(&mut self) {
+        if let Some(kib) = resident_kib() {
+            self.peak_kib = self.peak_kib.max(kib);
         }
     }
 
@@ -410,6 +472,8 @@ impl Run {
     fn actions(&self) -> u32 {
         if self.plan.sql > 0 {
             self.plan.typing + 2
+        } else if self.plan.table > 0 {
+            table::frames(self.plan.table)
         } else {
             self.plan.scroll
         }
@@ -437,6 +501,10 @@ impl Run {
         }
         let (x, y) = SCROLL_AT;
         let at = egui::pos2(x, y);
+        if self.plan.table > 0 {
+            table::events(self.scrolled, input, at);
+            return;
+        }
         if self.plan.sql > 0 {
             let button = |pressed| egui::Event::PointerButton {
                 pos: at,
@@ -486,8 +554,11 @@ impl Run {
             return;
         }
         if self.scrolling(since) {
-            if self.scrolled == 0 && self.editor.is_some() {
+            if self.scrolled == 0 && (self.editor.is_some() || self.plan.table > 0) {
                 self.rss_before_kib = resident_kib();
+            }
+            if self.plan.table > 0 && self.scrolled.is_multiple_of(table::SAMPLE_EVERY) {
+                self.sample();
             }
             // The first frame of the scroll follows an idle one: not counted.
             if self.scrolled > 0 {
@@ -503,6 +574,24 @@ impl Run {
             ctx.request_repaint();
             return;
         }
+        // After the walk: leave the screen, rest, then read the memory.
+        if self.plan.table > 0 && since >= idle_end {
+            match self.left {
+                None => {
+                    self.sample();
+                    self.wanted = Some(Action::Navigate(Route::Home));
+                    self.left = Some(now);
+                    ctx.request_repaint_after(table::AFTER_LEAVING);
+                    return;
+                }
+                Some(left) if now < left + table::AFTER_LEAVING => {
+                    ctx.request_repaint_after(left + table::AFTER_LEAVING - now);
+                    return;
+                }
+                Some(_) if self.rss_left_kib.is_none() => self.rss_left_kib = resident_kib(),
+                Some(_) => {}
+            }
+        }
         if since >= idle_end {
             self.done = true;
             tracing::info!(
@@ -515,6 +604,11 @@ impl Run {
                 rss_after_kib = self.editor.as_ref().and_then(|_| resident_kib()),
                 // The text's size after: the typing reached the editor.
                 sql_bytes = self.editor.as_ref().map(Buffer::len),
+                table = self.plan.table,
+                pages = table::pages(self.plan.table),
+                peak_kib = self.peak_kib,
+                pages_read = self.pages_read,
+                rss_after_leaving_kib = self.rss_left_kib,
                 first_frame_ms = self.first_frame_ms,
                 idle_secs = self.plan.idle.as_secs(),
                 idle_frames = self.idle_frames,
@@ -604,6 +698,7 @@ mod tests {
             scroll: 0,
             sql: 0,
             typing: 0,
+            table: 0,
         }
     }
 

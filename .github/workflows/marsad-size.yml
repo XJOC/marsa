@@ -12,6 +12,8 @@ on:
       - Cargo.toml
       - crates/*/Cargo.toml
       - crates/app/src/daemon/db_browser/**
+      - tools/e2e/db-browser.sh
+      - tools/e2e/api.sh
       - .github/workflows/marsad-size.yml
   workflow_dispatch:
 
@@ -83,8 +85,9 @@ jobs:
         run: |
           exe=""
           if [ "${{ runner.os }}" = "Windows" ]; then exe=".exe"; fi
-          cargo build -p marsa --release --bin marsad
+          cargo build -p marsa --release --bin marsad --bin marsa
           cp "target/release/marsad$exe" "$RUNNER_TEMP/marsad-new$exe"
+          cp "target/release/marsa$exe" "$RUNNER_TEMP/marsa-new$exe"
           git worktree add --detach "$RUNNER_TEMP/baseline" "$BASELINE"
           # The same target folder, so the dependencies both share build once.
           (cd "$RUNNER_TEMP/baseline" && cargo build -p marsa --release --bin marsad --target-dir "$GITHUB_WORKSPACE/target")
@@ -96,3 +99,16 @@ jobs:
             echo "FAIL: marsad grew by more than $MAX_GROWTH bytes"
             exit 1
           fi
+
+      # The memory half of the budget: marsad idle against the baseline, and
+      # while browsing a large SQLite file (tools/e2e/db-browser.sh). `ps`
+      # reads another program's memory on Linux and macOS only; Windows has
+      # the size check above.
+      - name: marsad memory, idle and while browsing
+        if: runner.os != 'Windows'
+        env:
+          MARSAD_NEW: ${{ runner.temp }}/marsad-new
+          MARSAD_BASE: ${{ github.workspace }}/target/release/marsad
+          MARSA: ${{ runner.temp }}/marsa-new
+        run: tools/e2e/db-browser.sh
+
