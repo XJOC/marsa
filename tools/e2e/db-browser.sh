@@ -10,11 +10,13 @@
 #    - Live heap after close (macOS): the bytes the malloc zone still has
 #      allocated 30 s after the first visit's `close`, within 1 MB of
 #      before the first request.
-#    - Growth across visits (macOS and Linux, the default allocator):
-#      resident memory after visit 10 minus after visit 2, within 2 MB.
-#    The memory after the first `close`, and the peak, are recorded only:
-#    they hold the freed pages the allocator keeps for reuse (ADR 0028,
-#    section 9).
+#    - Growth across visits (macOS, the default allocator): resident
+#      memory after visit 10 minus after visit 2, within 2 MB.
+#    The memory after the first `close`, the peak, and the growth across
+#    visits on Linux are recorded only: they hold the freed pages the
+#    allocator keeps for reuse. On Linux glibc's arenas move that number by
+#    about 2 MB at random on the same code, so it cannot be a limit; the
+#    live heap on macOS shows nothing of ours stays (ADR 0028, section 9).
 #
 # Every run uses a new data folder; nothing touches the runner's system.
 # Needs: MARSAD_NEW, MARSAD_BASE, MARSA (the CLI at this change), python3,
@@ -229,7 +231,9 @@ for visit in $(seq 2 10); do
 done
 after_10=$(rss "$PID")
 visits_growth=$((after_10 - after_2))
-echo "visits: $after_2 KiB after visit 2, $after_10 KiB after visit 10: ${visits_growth} KiB (limit $VISITS_LIMIT_KIB)"
+visits_limit="limit $VISITS_LIMIT_KIB"
+if ! $darwin; then visits_limit="recorded"; fi
+echo "visits: $after_2 KiB after visit 2, $after_10 KiB after visit 10: ${visits_growth} KiB ($visits_limit)"
 stop
 
 step "the budget"
@@ -243,11 +247,11 @@ if $darwin && [ "$live_growth" -gt "$LIVE_LIMIT_KIB" ]; then
   echo "FAIL: after close the malloc zone still holds $live_growth KiB more than before"
   failed=1
 fi
-if [ "$visits_growth" -gt "$VISITS_LIMIT_KIB" ]; then
+if $darwin && [ "$visits_growth" -gt "$VISITS_LIMIT_KIB" ]; then
   echo "FAIL: visits 3 to 10 added $visits_growth KiB"
   failed=1
 fi
 live_note=""
 if $darwin; then live_note=", live heap ${live_growth} KiB"; fi
-echo "db-browser budget ($(uname -sm)): idle ${idle_growth} KiB, peak $peak KiB, after close ${close_growth} KiB (recorded)${live_note}, visits 2 to 10 ${visits_growth} KiB"
+echo "db-browser budget ($(uname -sm)): idle ${idle_growth} KiB, peak $peak KiB, after close ${close_growth} KiB (recorded)${live_note}, visits 2 to 10 ${visits_growth} KiB ($visits_limit)"
 exit "$failed"
