@@ -35,11 +35,16 @@ const INITDB_LIMIT: Duration = Duration::from_secs(120);
 const SINGLE_USER_LIMIT: Duration = Duration::from_secs(60);
 /// PostgreSQL's severities: a line with one fails a step of the init.
 const SEVERE: [&str; 3] = ["ERROR:", "FATAL:", "PANIC:"];
-/// For each attempt of the readiness check.
-const CONNECT_LIMIT: Duration = Duration::from_millis(500);
-/// An `SSLRequest`: its length, 8, then the code 80877103. The first message
-/// a client may send, before any user name.
-pub(super) const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
+/// For each attempt of the readiness check, a whole session start: a busy
+/// Windows machine can take more than a few hundred milliseconds to make the
+/// backend process.
+const CONNECT_LIMIT: Duration = Duration::from_secs(2);
+/// The longest message of a session start that the check reads.
+const REPLY_LIMIT: usize = 8 * 1024;
+/// A `Terminate` message: the client ends the session.
+const TERMINATE: [u8; 5] = [b'X', 0, 0, 0, 4];
+/// `cannot_connect_now`: the server starts up, recovers, or shuts down.
+const CANNOT_CONNECT_NOW: &[u8] = b"57P03";
 
 /// The programs of one installed PostgreSQL version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,25 +162,76 @@ async fn write_hba(path: &Path) -> io::Result<()> {
     file.sync_all().await
 }
 
-/// Whether PostgreSQL takes connections on `127.0.0.1:<port>`: it answers
-/// an [`SSL_REQUEST`] with one byte, `N` or `S`. Only a postmaster whose
-/// start is done answers: it has taken its lock files and made all its
-/// sockets. A bare TCP connection is not enough, because the TCP listener
-/// is made before the socket and its lock file. PostgreSQL logs nothing for
-/// this: the connection closes before any startup message.
+/// The `StartupMessage` of protocol 3.0 for the role `root`, which Marsa's
+/// `pg_hba.conf` lets in over TCP, and the database `postgres`, which every
+/// cluster has.
+pub(super) fn startup_message() -> Vec<u8> {
+    const PROTOCOL_3_0: u32 = 3 << 16;
+    const PARAMETERS: &[u8] = b"user\0root\0database\0postgres\0\0";
+    // The length counts itself and the protocol number.
+    let length = 8 + PARAMETERS.len() as u32;
+    let mut message = Vec::with_capacity(length as usize);
+    message.extend_from_slice(&length.to_be_bytes());
+    message.extend_from_slice(&PROTOCOL_3_0.to_be_bytes());
+    message.extend_from_slice(PARAMETERS);
+    message
+}
+
+/// Whether PostgreSQL takes connections on `127.0.0.1:<port>`: it takes a
+/// [`startup_message`] up to `ReadyForQuery`. An open port or an answer to
+/// an `SSLRequest` is not enough: PostgreSQL gives both while it still
+/// refuses every session with "the database system is starting up".
+///
+/// As `pg_isready` does, a server that asks for a password, or refuses this
+/// session for any reason but [`CANNOT_CONNECT_NOW`], also counts: the user
+/// may have changed `pg_hba.conf` or dropped the role, and that server runs.
 pub(super) async fn answers(port: u16) -> bool {
     let ask = async {
         let address = (Ipv4Addr::LOCALHOST, port);
         let mut stream = tokio::net::TcpStream::connect(address).await.ok()?;
-        stream.write_all(&SSL_REQUEST).await.ok()?;
-        let mut answer = [0_u8; 1];
-        stream.read_exact(&mut answer).await.ok()?;
-        Some(matches!(&answer, b"N" | b"S"))
+        stream.write_all(&startup_message()).await.ok()?;
+        takes_session(&mut stream).await
     };
     matches!(
         tokio::time::timeout(CONNECT_LIMIT, ask).await,
         Ok(Some(true))
     )
+}
+
+/// Reads the server's messages to a [`startup_message`] until they say
+/// whether it takes sessions ([`answers`]); `None` when they cannot be read.
+async fn takes_session(stream: &mut tokio::net::TcpStream) -> Option<bool> {
+    loop {
+        let kind = stream.read_u8().await.ok()?;
+        // The length counts its own four bytes.
+        let length = usize::try_from(stream.read_u32().await.ok()?).ok()?;
+        let length = length.checked_sub(4).filter(|n| *n <= REPLY_LIMIT)?;
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.ok()?;
+        match kind {
+            // `Authentication`: any code but 0 asks for a password.
+            b'R' if body.get(..4)? != [0; 4] => return Some(true),
+            // Accepted, then the settings, the cancel key, and notices.
+            b'R' | b'S' | b'K' | b'N' | b'v' => {}
+            b'Z' => {
+                // Ended properly, so PostgreSQL logs nothing. The answer is
+                // known, whether this arrives or not.
+                let _ = stream.write_all(&TERMINATE).await;
+                return Some(true);
+            }
+            b'E' => return Some(sqlstate(&body)? != CANNOT_CONNECT_NOW),
+            _ => return None,
+        }
+    }
+}
+
+/// The SQLSTATE of an `ErrorResponse`: its field `C`. Each field is one
+/// letter, its text, and a zero byte.
+fn sqlstate(fields: &[u8]) -> Option<&[u8]> {
+    let code = fields
+        .split(|byte| *byte == 0)
+        .find_map(|field| field.strip_prefix(b"C"))?;
+    (code.len() == 5).then_some(code)
 }
 
 /// Why a run that ended by itself before it took connections did not
@@ -251,5 +307,132 @@ async fn program_at(probes: &dyn ProcessProbe, pid: u32) -> String {
         Liveness::Alive { exe, .. } => exe.display().to_string(),
         Liveness::Gone => "nothing (it has ended since)".to_owned(),
         Liveness::Unknown => "a program that cannot be told".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+
+    /// One message of the server: its kind, its length, and its body.
+    fn message(kind: u8, body: &[u8]) -> Vec<u8> {
+        let length = u32::try_from(body.len() + 4).unwrap();
+        [&[kind][..], &length.to_be_bytes(), body].concat()
+    }
+
+    fn error(code: &str, text: &str) -> Vec<u8> {
+        let fields = format!("SFATAL\0VFATAL\0C{code}\0M{text}\0\0");
+        message(b'E', fields.as_bytes())
+    }
+
+    fn authentication(code: u32) -> Vec<u8> {
+        message(b'R', &code.to_be_bytes())
+    }
+
+    /// A server on `127.0.0.1` that takes one connection, reads the startup
+    /// message, sends `reply`, and closes once the client has. It returns what
+    /// the client sent after the startup message.
+    async fn fake(reply: Vec<u8>) -> (u16, JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut startup = vec![0; startup_message().len()];
+            stream.read_exact(&mut startup).await.unwrap();
+            assert_eq!(startup, startup_message());
+            stream.write_all(&reply).await.unwrap();
+            // It fails on macOS when the client has closed already.
+            let _ = stream.shutdown().await;
+            let mut rest = Vec::new();
+            // A client that closes with replies unread resets the connection.
+            let _ = stream.read_to_end(&mut rest).await;
+            rest
+        });
+        (port, served)
+    }
+
+    async fn answer_to(reply: Vec<u8>) -> bool {
+        let (port, served) = fake(reply).await;
+        let answer = answers(port).await;
+        served.await.unwrap();
+        answer
+    }
+
+    #[test]
+    fn the_startup_message_is_protocol_3_for_root() {
+        let message = startup_message();
+        assert_eq!(message[..4], (message.len() as u32).to_be_bytes());
+        assert_eq!(message[4..8], [0, 3, 0, 0]);
+        assert_eq!(message[8..], *b"user\0root\0database\0postgres\0\0");
+    }
+
+    #[tokio::test]
+    async fn a_whole_session_start_is_ready_and_is_ended() {
+        let reply = [
+            authentication(0),
+            message(b'S', b"server_version\x0018.7\0"),
+            message(b'N', b"SNOTICE\0\0"),
+            message(b'K', &[0; 8]),
+            message(b'Z', b"I"),
+        ]
+        .concat();
+        let (port, served) = fake(reply).await;
+        assert!(answers(port).await);
+        assert_eq!(served.await.unwrap(), TERMINATE);
+    }
+
+    #[tokio::test]
+    async fn an_open_port_that_says_starting_up_is_not_ready() {
+        for text in [
+            "the database system is starting up",
+            "the database system is in recovery mode",
+            "the database system is shutting down",
+        ] {
+            assert!(!answer_to(error("57P03", text)).await, "{text}");
+        }
+    }
+
+    /// The user changed `pg_hba.conf` or dropped the role: the server runs.
+    #[tokio::test]
+    async fn a_server_that_refuses_this_session_for_another_reason_is_ready() {
+        assert!(answer_to(error("28000", "pg_hba.conf rejects connection")).await);
+        assert!(answer_to(error("53300", "sorry, too many clients already")).await);
+        let after_auth = [authentication(0), error("3D000", "no database")].concat();
+        assert!(answer_to(after_auth).await);
+        // `AuthenticationSASL`.
+        assert!(answer_to(authentication(10)).await);
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_cannot_be_read_is_not_ready() {
+        let unreadable = [
+            Vec::new(),
+            // The answer to an `SSLRequest`, not to a startup message.
+            b"N".to_vec(),
+            // Accepted, then closed before `ReadyForQuery`.
+            authentication(0),
+            message(b'R', &[0, 0]),
+            // No SQLSTATE.
+            message(b'E', b"SFATAL\0\0"),
+            // The postmaster's failed fork: no length, only words.
+            b"Ecould not fork new process for connection\0".to_vec(),
+            [&b"E"[..], &3_u32.to_be_bytes()].concat(),
+            message(b'?', b""),
+        ];
+        for reply in unreadable {
+            assert!(!answer_to(reply.clone()).await, "{reply:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_silent_port_and_a_closed_one_are_not_ready() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // The system takes the connection; nothing ever answers.
+        assert!(!answers(port).await);
+        drop(listener);
+        assert!(!answers(port).await);
     }
 }

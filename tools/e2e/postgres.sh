@@ -325,6 +325,7 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 [ "$started" = true ] || fail "postgres did not start with marsad"
+# No retry: `running` means the server accepts sessions.
 [ "$(tcp -U root -d app -c 'select count(*) from posts')" = 2 ] || fail "the data did not survive"
 run marsa services stop postgres
 

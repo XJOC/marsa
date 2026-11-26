@@ -100,7 +100,8 @@ pub(crate) fn view(model: &Model) -> DatabasesView<'_> {
         .map_or_else(|| strings::CHOOSE_SOURCE.to_owned(), strings::source_label);
     let mut choices = Vec::new();
     for info in db.sources.iter().flat_map(|sources| &sources.servers) {
-        if info.databases.is_empty() && info.state != marsa_core::types::ServiceState::Running {
+        use marsa_core::types::ServiceState::{Running, Starting};
+        if info.databases.is_empty() && !matches!(info.state, Running | Starting) {
             choices.push((
                 Choice::Start(info.server),
                 strings::start_server(info.server),

@@ -339,16 +339,17 @@ run marsa services start mysql
   fail "the init ran twice"
 run marsa daemon stop
 run marsa daemon start
-# `running` comes with the process; its first answer may come later.
 started=false
 for _ in $(seq 1 60); do
-  if marsa services | grep -qE '^mysql +running' && tcp -e 'select 1' >/dev/null 2>&1; then
+  if marsa services | grep -qE '^mysql +running'; then
     started=true
     break
   fi
   sleep 1
 done
 [ "$started" = true ] || fail "mysql did not start with marsad"
+# No retry: `running` means the server takes connections.
+tcp -e 'select 1' >/dev/null || fail "mysql is running and does not answer"
 [ "$(tcp app -e 'select count(*) from posts')" = 2 ] || fail "the data did not survive"
 
 step "marsad killed: the next start stops our old mysqld with SIGTERM"

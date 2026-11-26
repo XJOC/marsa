@@ -27,6 +27,21 @@ impl ServiceRuntime {
         let _ = events.send(Event::Log(line));
     }
 
+    /// Sets `Running` for a run that is `Starting` with its process
+    /// ([`ServiceRuntime::awaiting_ready`]), and tells every reader, under
+    /// the caller's lock. A run that has ended or is stopping meanwhile keeps
+    /// its status.
+    pub(crate) fn set_ready(&mut self, events: &broadcast::Sender<Event>) {
+        let status = &mut self.status;
+        if status.state != ServiceState::Starting || status.pid.is_none() {
+            return;
+        }
+        status.state = ServiceState::Running;
+        status.since_ms = Some(now_ms());
+        // An error only means that nobody listens right now.
+        let _ = events.send(Event::ServiceChanged(status.clone()));
+    }
+
     /// Sets `Failed { code }` and tells every reader, under the caller's
     /// lock like the supervisor, so events come in the order of the changes.
     /// Only while no task runs the service: the supervisor owns the status

@@ -178,8 +178,8 @@ async fn server_info(
         return Ok(None);
     };
     let state = manager.status().state;
-    // Only once it said it takes connections: a server that starts shows
-    // as running, with no databases yet and no problem.
+    // Only once it said it takes connections: a server that starts is
+    // listed with its state, no databases yet, and no problem.
     let (databases, problem) = if manager.ready_port(daemon).is_some() {
         match within(servers::with(daemon, server, None, servers::databases)).await {
             Ok(names) => (

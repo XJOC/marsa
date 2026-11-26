@@ -67,6 +67,9 @@ pub const STOP_LIMIT_MAX: Duration = Duration::from_secs(60);
 pub struct ServiceRuntime {
     pub status: ServiceStatus,
     pub logs: LogBuffer,
+    /// A run is `Starting`, not `Running`, until [`ServiceRuntime::set_ready`]:
+    /// for a program that takes no clients for a while after its start.
+    pub(crate) awaits_ready: bool,
 }
 
 impl ServiceRuntime {
@@ -81,6 +84,16 @@ impl ServiceRuntime {
                 since_ms: None,
             },
             logs: LogBuffer::new(id),
+            awaits_ready: false,
+        }
+    }
+
+    /// [`ServiceRuntime::new`] for a service whose owner checks when it is
+    /// ready.
+    pub(crate) fn awaiting_ready(id: ServiceId) -> Self {
+        Self {
+            awaits_ready: true,
+            ..Self::new(id)
         }
     }
 }
@@ -345,7 +358,12 @@ async fn run(
         .take()
         .map(|p| read_lines(p, LogStream::Stderr, shared));
     info!(service = %spec.id, pid, "started");
-    shared.set_state(ServiceState::Running, pid, restarts);
+    let state = if lock(&shared.runtime).awaits_ready {
+        ServiceState::Starting
+    } else {
+        ServiceState::Running
+    };
+    shared.set_state(state, pid, restarts);
     let exit = tokio::select! {
         result = child.wait() => {
             match result {

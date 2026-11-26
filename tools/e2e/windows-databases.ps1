@@ -178,8 +178,7 @@ function LogSince([string]$Name, [long]$Mark) {
     }
 }
 
-# Runs $Check until it returns $true without a failure, $Seconds at most:
-# `running` comes with the process, its first answer later.
+# Runs $Check until it returns $true without a failure, $Seconds at most.
 function Until([string]$What, [int]$Seconds, [scriptblock]$Check) {
     $last = ''
     for ($i = 1; $i -le $Seconds; $i++) {
@@ -570,8 +569,9 @@ try {
     # The start of marsad starts every server that is on, MySQL too.
     MarsaOk services start mysql
     WaitRunning $ids
-    Until 'PostgreSQL answers' 60 { (PgSql 'select 1') -eq '1' }
-    if ($WithValkey) { Until 'Valkey answers' 60 { (Valkey PING) -eq 'PONG' } }
+    # No retry: `running` means each server takes connections.
+    if ((PgSql 'select 1') -ne '1') { Fail 'PostgreSQL is running and does not answer' }
+    if ($WithValkey -and (Valkey PING) -ne 'PONG') { Fail 'Valkey is running and does not answer' }
     $log = LogSince 'mysql.log' $myMark
     if ($log -notmatch 'crash recovery') { Info "MySQL logged no crash recovery: $log" }
     if ((MySql 'app' 'select count(*) from posts') -ne '2') { Fail 'MySQL lost a committed row' }

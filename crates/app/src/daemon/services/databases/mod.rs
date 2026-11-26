@@ -14,7 +14,8 @@
 //! that file.
 //!
 //! [`ServerManager`] starts and stops one server under the supervisor, one
-//! action at a time. A failed start leaves the status `failed`, with the
+//! action at a time. Its status is `starting` until the server answers by its
+//! own protocol. A failed start leaves the status `failed`, with the
 //! reason in the recent lines. A run that ends by itself before it takes
 //! connections is read once: if PostgreSQL refused because a live process
 //! holds one of its lock files, the start fails as the check before it

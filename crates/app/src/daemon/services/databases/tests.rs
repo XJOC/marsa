@@ -32,12 +32,13 @@ use crate::daemon::state::Daemon;
 // fake programs through shell scripts, so on Unix only.
 #[cfg(unix)]
 use {
-    super::postgres::{Programs, SSL_REQUEST, ensure_cluster},
+    super::postgres::{Programs, ensure_cluster, startup_message},
     crate::daemon::services::supervisor::lock,
+    marsa_core::codes,
     marsa_core::databases::{PG_HBA_CONF, ROOT_ROLE_SQL, initdb_args, single_user_args},
     marsa_core::recipes::Os,
     marsa_core::services::StopMethod,
-    marsa_core::types::{ServiceAction, ServiceStatus},
+    marsa_core::types::{Event, ServiceAction, ServiceStatus},
     tokio::io::AsyncWriteExt as _,
 };
 
@@ -399,6 +400,8 @@ pub(super) mod server {
     const WAIT: Duration = Duration::from_secs(30);
     /// The program the pid of the lock file runs now.
     const OTHER: &str = "/Applications/Other.app/Contents/MacOS/Other";
+    /// The `ErrorResponse` of a PostgreSQL that is starting up.
+    const STARTING_UP: &[u8] = b"E\0\0\0\x13SFATAL\0C57P03\0\0";
     /// How long the fake in `late` mode waits before it listens.
     const LATE: Duration = Duration::from_secs(5);
 
@@ -406,10 +409,12 @@ pub(super) mod server {
     /// the variable is unset and this returns at once. Its first line
     /// is `fake pid <pid>` in every mode (`Pg::run_pids`).
     ///
-    /// - `serve` listens on the `port=` of its arguments, answers an
-    ///   `SSLRequest` with `N`, prints each stop signal, ignores
+    /// - `serve` listens on the `port=` of its arguments, accepts the
+    ///   session of a startup message, prints each stop signal, ignores
     ///   SIGTERM, and exits at SIGINT, as PostgreSQL does with a client
     ///   connected.
+    /// - `starting=<file>` serves too, but refuses each session as
+    ///   PostgreSQL does while it starts up, until `<file>` exists.
     /// - `noisy` serves too, but prints PostgreSQL's refusal for
     ///   `postmaster.pid` first, and again after its first answer.
     /// - `locked` prints that refusal, held by pid 4242, and exits 1.
@@ -518,11 +523,23 @@ pub(super) mod server {
                         }
                     }
                     Ok((mut stream, _)) = listener.accept(), if mode != "mute" => {
-                        let mut request = [0_u8; 8];
+                        let mut request = vec![0_u8; startup_message().len()];
                         if stream.read_exact(&mut request).await.is_ok()
-                            && request == SSL_REQUEST
+                            && request == startup_message()
                         {
-                            let _ = stream.write_all(b"N").await;
+                            let recovering = mode
+                                .strip_prefix("starting=")
+                                .is_some_and(|done| !Path::new(done).exists());
+                            if recovering {
+                                if !answered {
+                                    eprintln!("fake is starting up");
+                                }
+                                answered = true;
+                                let _ = stream.write_all(STARTING_UP).await;
+                                continue;
+                            }
+                            // `AuthenticationOk`, then `ReadyForQuery`.
+                            let _ = stream.write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I").await;
                             if mode == "noisy" && !answered {
                                 data_dir();
                             }
@@ -1146,6 +1163,65 @@ pub(super) mod server {
         );
         assert!(!enabled(&pg));
         assert!(nothing_left(&pg));
+    }
+
+    /// The port is open and the server refuses with "starting up": the
+    /// status stays `starting`, with the pid, and the start does not end. Once
+    /// it accepts a session, both say `running`.
+    #[tokio::test]
+    async fn a_server_that_is_starting_up_is_not_running_yet() {
+        let marker = tempfile::tempdir().unwrap();
+        let done = marker.path().join("recovered");
+        let mode = format!("starting={}", done.display());
+        let pg = pg(&mode, probes(Liveness::Gone, None));
+        let mut events = pg.daemon.events().subscribe();
+        let start = spawn_saved(&pg, ServiceAction::Start);
+        pg.wait_for("fake is starting up").await;
+        // Time for several more checks.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let status = pg.daemon.server(ServerKind::Postgres).status();
+        assert_eq!(status.state, ServiceState::Starting);
+        assert!(status.pid.is_some());
+        assert!(!start.is_finished());
+        while let Ok(event) = events.try_recv() {
+            if let Event::ServiceChanged(status) = event {
+                assert_ne!(status.state, ServiceState::Running);
+            }
+        }
+
+        fs::write(&done, "").unwrap();
+        let status = start.await.unwrap().unwrap();
+        assert_eq!(status.state, ServiceState::Running);
+        let said_running = std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, Event::ServiceChanged(changed) if changed == status));
+        assert!(said_running, "the event bus says running");
+        pg.act(ServiceAction::Stop).await.unwrap();
+    }
+
+    /// A server that never stops saying "starting up" is stopped at the
+    /// limit, and the status says why.
+    #[tokio::test]
+    async fn a_server_that_stays_in_starting_up_fails_at_the_limit() {
+        let mut pg = pg(
+            "starting=/nonexistent/recovered",
+            probes(Liveness::Gone, None),
+        );
+        // Nothing here depends on how fast the fake starts.
+        Arc::get_mut(&mut pg.daemon)
+            .unwrap()
+            .server_mut(ServerKind::Postgres)
+            .ready_limit = Duration::from_secs(3);
+        let status = pg.act(ServiceAction::Start).await.unwrap();
+        let failed = ServiceState::Failed {
+            code: codes::POSTGRES_START_TIMEOUT.into(),
+        };
+        assert_eq!(status.state, failed);
+        let said = pg.texts();
+        assert!(said.iter().any(|text| text.contains("took no connections")));
+        assert!(
+            !pg.daemon
+                .proc_alive(ServiceId::Database(ServerKind::Postgres))
+        );
     }
 
     /// A start in line before a stop never begins, nor does the start of
