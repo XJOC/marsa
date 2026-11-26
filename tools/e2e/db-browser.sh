@@ -5,9 +5,16 @@
 #    start, the median of 3 runs, at this change and at the baseline. Pass:
 #    within 2 MB.
 # 2. marsad while browsing a site's SQLite file of 100,000 rows and a table
-#    of 1 MiB values: 200 pages, one whole value, a 1,000-row statement. The
-#    peak is recorded. Then `close`; 30 s later marsad must be within 5 MB
-#    of its memory before the first request.
+#    of 1 MiB values: 200 pages, one whole value, a 1,000-row statement,
+#    then `close` and 30 s. One visit, then nine more.
+#    - Live heap after close (macOS): the bytes the malloc zone still has
+#      allocated 30 s after the first visit's `close`, within 1 MB of
+#      before the first request.
+#    - Growth across visits (macOS and Linux, the default allocator):
+#      resident memory after visit 10 minus after visit 2, within 2 MB.
+#    The memory after the first `close`, and the peak, are recorded only:
+#    they hold the freed pages the allocator keeps for reuse (ADR 0028,
+#    section 9).
 #
 # Every run uses a new data folder; nothing touches the runner's system.
 # Needs: MARSAD_NEW, MARSAD_BASE, MARSA (the CLI at this change), python3,
@@ -25,7 +32,8 @@ NEW=${MARSAD_NEW:?the marsad of this change}
 BASE=${MARSAD_BASE:?the marsad of the baseline}
 CLI=${MARSA:?the marsa CLI of this change}
 IDLE_LIMIT_KIB=$((2 * 1024))
-CLOSE_LIMIT_KIB=$((5 * 1024))
+LIVE_LIMIT_KIB=1024
+VISITS_LIMIT_KIB=$((2 * 1024))
 
 step() { printf '\n\n===== %s =====\n' "$*"; }
 fail() {
@@ -139,6 +147,21 @@ heap() {
   esac
 }
 
+# live: the KiB the malloc zones of marsad still have allocated (macOS).
+live() {
+  vmmap --summary "$PID" 2>/dev/null | awk '
+    function kib(v) {
+      if (v ~ /G$/) return v * 1024 * 1024
+      if (v ~ /M$/) return v * 1024
+      if (v ~ /K$/) return v + 0
+      return v / 1024
+    }
+    /^MALLOC ZONE/ { zones = 1; next }
+    zones && /^TOTAL/ { exit }
+    zones && /Zone/ { sum += kib($7) }
+    END { printf "%d\n", sum }'
+}
+
 # at NAME: marsad's memory and threads now, to find where memory stays.
 at() {
   sample
@@ -180,21 +203,33 @@ browse() {
   at "after close + 30 s"
 }
 
-step "200 pages, one whole value, and a statement of 1,000 rows; close, then 30 s"
+darwin=false
+if [ "$(uname -s)" = Darwin ]; then
+  darwin=true
+  command -v vmmap >/dev/null || fail "vmmap is needed to read the malloc zone"
+  live_before=$(live)
+fi
+
+step "visit 1: 200 pages, one whole value, and a statement of 1,000 rows; close, then 30 s"
 browse
 after=$(rss "$PID")
 close_growth=$((after - before))
-echo "browsing: $before KiB before the first request, peak $peak KiB, $after KiB 30 s after close: ${close_growth} KiB (limit $CLOSE_LIMIT_KIB)"
+echo "visit 1: $before KiB before the first request, peak $peak KiB, $after KiB 30 s after close: ${close_growth} KiB (recorded)"
+if $darwin; then
+  live_after=$(live)
+  live_growth=$((live_after - live_before))
+  echo "live heap: $live_before KiB before the first request, $live_after KiB 30 s after close: ${live_growth} KiB (limit $LIVE_LIMIT_KIB)"
+fi
 
-# Recorded, not a limit: if the second and third visits add almost
-# nothing, what stays after the first is memory the allocator keeps for
-# reuse, not memory that grows with each visit.
-step "the same visit twice more (recorded)"
-for cycle in 2 3; do
-  echo "visit $cycle:"
+step "visits 2 to 10"
+for visit in $(seq 2 10); do
+  echo "visit $visit:"
   browse
+  if [ "$visit" = 2 ]; then after_2=$(rss "$PID"); fi
 done
-echo "after 3 visits: $(rss "$PID") KiB; after 1: $after KiB; before: $before KiB"
+after_10=$(rss "$PID")
+visits_growth=$((after_10 - after_2))
+echo "visits: $after_2 KiB after visit 2, $after_10 KiB after visit 10: ${visits_growth} KiB (limit $VISITS_LIMIT_KIB)"
 stop
 
 step "the budget"
@@ -204,9 +239,15 @@ if [ "$(abs "$idle_growth")" -gt "$IDLE_LIMIT_KIB" ]; then
   echo "FAIL: idle memory moved by $idle_growth KiB"
   failed=1
 fi
-if [ "$close_growth" -gt "$CLOSE_LIMIT_KIB" ]; then
-  echo "FAIL: after close marsad kept $close_growth KiB more than before"
+if $darwin && [ "$live_growth" -gt "$LIVE_LIMIT_KIB" ]; then
+  echo "FAIL: after close the malloc zone still holds $live_growth KiB more than before"
   failed=1
 fi
-echo "db-browser budget ($(uname -sm)): idle ${idle_growth} KiB, peak $peak KiB, after close ${close_growth} KiB"
+if [ "$visits_growth" -gt "$VISITS_LIMIT_KIB" ]; then
+  echo "FAIL: visits 3 to 10 added $visits_growth KiB"
+  failed=1
+fi
+live_note=""
+if $darwin; then live_note=", live heap ${live_growth} KiB"; fi
+echo "db-browser budget ($(uname -sm)): idle ${idle_growth} KiB, peak $peak KiB, after close ${close_growth} KiB (recorded)${live_note}, visits 2 to 10 ${visits_growth} KiB"
 exit "$failed"
