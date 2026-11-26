@@ -1,4 +1,5 @@
-//! The browser's open connections to Marsa's servers (ADR 0028, section 6).
+//! The browser's open connections (ADR 0028, section 6): to Marsa's
+//! servers, and to the sites' SQLite files while the window browses them.
 //!
 //! No pool: one connection for each source, used by one request at a time.
 //! At most [`MAX_OPEN`] sources stay open, and the least recently used
@@ -10,7 +11,8 @@
 //! that runs keeps its own handle to the slot, and its connection is dropped
 //! when it ends.
 //!
-//! Generic over the connection, so the tests count closes with a fake.
+//! Generic over the source's key and the connection, so the tests count
+//! closes with a fake.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -23,7 +25,7 @@ pub(super) const MAX_OPEN: usize = 4;
 
 /// A server source: the server, and the database (`None` for the server's
 /// own catalog connection).
-pub(super) type Key = (DbServer, Option<String>);
+pub(super) type ServerKey = (DbServer, Option<String>);
 
 /// One source's connection: `None` until the first request opens it, while
 /// a request uses it, and after a request failed on it. A `tokio` lock held across `.await`
@@ -31,20 +33,20 @@ pub(super) type Key = (DbServer, Option<String>);
 /// shared data (AGENTS.md section 6).
 pub(super) type Slot<C> = Arc<tokio::sync::Mutex<Option<C>>>;
 
-pub(super) struct Store<C> {
-    inner: Mutex<Inner<C>>,
+pub(super) struct Store<K, C> {
+    inner: Mutex<Inner<K, C>>,
     /// How long a connection stays open with no request.
     idle: Duration,
 }
 
-struct Inner<C> {
+struct Inner<K, C> {
     /// Most recently used last.
-    slots: Vec<(Key, Slot<C>, Instant)>,
+    slots: Vec<(K, Slot<C>, Instant)>,
     /// A task that closes idle connections runs: one while any slot is open.
     reaping: bool,
 }
 
-impl<C: Send + 'static> Store<C> {
+impl<K: PartialEq + Clone + Send + 'static, C: Send + 'static> Store<K, C> {
     pub(super) fn new(idle: Duration) -> Self {
         Self {
             inner: Mutex::new(Inner {
@@ -59,7 +61,7 @@ impl<C: Send + 'static> Store<C> {
     /// recently used source closes when more than [`MAX_OPEN`] would be
     /// open. `true` with it when a task to close idle connections must
     /// start ([`Self::spawn_reaper`]).
-    pub(super) fn slot(&self, key: &Key) -> (Slot<C>, bool) {
+    pub(super) fn slot(&self, key: &K) -> (Slot<C>, bool) {
         let mut inner = self.lock();
         let now = Instant::now();
         let slot = match inner.slots.iter().position(|(k, _, _)| k == key) {
@@ -82,9 +84,19 @@ impl<C: Send + 'static> Store<C> {
         (slot, start_reaper)
     }
 
-    /// Closes every source of `server`.
-    pub(super) fn close_server(&self, server: DbServer) {
-        self.lock().slots.retain(|((s, _), _, _)| *s != server);
+    /// Closes the sources whose key `closes` picks.
+    pub(super) fn close_where(&self, closes: impl Fn(&K) -> bool) {
+        self.lock().slots.retain(|(key, _, _)| !closes(key));
+    }
+
+    /// Takes every source out, for a caller that closes each connection
+    /// and waits for it.
+    pub(super) fn take_all(&self) -> Vec<Slot<C>> {
+        self.lock()
+            .slots
+            .drain(..)
+            .map(|(_, slot, _)| slot)
+            .collect()
     }
 
     pub(super) fn close_all(&self) {
@@ -105,7 +117,7 @@ impl<C: Send + 'static> Store<C> {
     }
 
     #[cfg(test)]
-    pub(super) fn open(&self) -> Vec<Key> {
+    pub(super) fn open(&self) -> Vec<K> {
         self.lock()
             .slots
             .iter()
@@ -138,7 +150,7 @@ impl<C: Send + 'static> Store<C> {
 
     /// A panic while the lock was held leaves the list whole: each change is
     /// one `Vec` call.
-    fn lock(&self) -> MutexGuard<'_, Inner<C>> {
+    fn lock(&self) -> MutexGuard<'_, Inner<K, C>> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -158,12 +170,12 @@ mod tests {
         }
     }
 
-    fn key(server: DbServer, database: &str) -> Key {
+    fn key(server: DbServer, database: &str) -> ServerKey {
         (server, Some(database.to_owned()))
     }
 
     /// Opens `key`'s connection in its slot, as a request would.
-    async fn open(store: &Store<Fake>, key: &Key, closed: &Arc<AtomicUsize>) {
+    async fn open(store: &Store<ServerKey, Fake>, key: &ServerKey, closed: &Arc<AtomicUsize>) {
         let (slot, _) = store.slot(key);
         *slot.lock().await = Some(Fake(Arc::clone(closed)));
     }
@@ -172,7 +184,7 @@ mod tests {
     async fn the_least_recently_used_source_closes_past_four() {
         let closed = Arc::new(AtomicUsize::new(0));
         let store = Store::new(Duration::from_secs(60));
-        let keys: Vec<Key> = ["a", "b", "c", "d", "e"]
+        let keys: Vec<ServerKey> = ["a", "b", "c", "d", "e"]
             .iter()
             .map(|db| key(DbServer::Mysql, db))
             .collect();
@@ -196,7 +208,7 @@ mod tests {
         open(&store, &key(DbServer::Mysql, "shop"), &closed).await;
         open(&store, &(DbServer::Mysql, None), &closed).await;
         open(&store, &key(DbServer::Postgres, "app"), &closed).await;
-        store.close_server(DbServer::Mysql);
+        store.close_where(|(server, _)| *server == DbServer::Mysql);
         assert_eq!(closed.load(Ordering::SeqCst), 2);
         assert_eq!(store.open(), [key(DbServer::Postgres, "app")]);
         store.close_all();

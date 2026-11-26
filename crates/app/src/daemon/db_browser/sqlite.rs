@@ -1,9 +1,12 @@
-//! A site's SQLite file: found, checked, and opened read-only for one
+//! A site's SQLite file: found, checked, and opened read-only, for one
 //! request at a time.
 //!
-//! The file is opened for each request and closed after it. An open handle
-//! would stop the user from deleting or replacing the file on Windows, and
-//! could hold back a WAL checkpoint of the site's own connections.
+//! The file stays open while the window browses it, and closes on `close`
+//! and after the idle time (`with_file`): a connection for each request
+//! started a driver thread for each. While it is open, Windows refuses to
+//! delete or replace the file, so `close` waits until it is closed. Between
+//! requests it holds no read transaction, so it never holds back a WAL
+//! checkpoint of the site's own connections.
 //!
 //! The database file itself is never written or created. A database in WAL
 //! mode is the one exception around it: SQLite makes its `-wal` and `-shm`
@@ -141,19 +144,47 @@ pub(super) async fn open(file: &Path) -> Result<SqliteConnection, HttpError> {
 
 /// Opens `file`, runs `work` on it, and closes it before the answer, so
 /// the file is free again at once, whatever `work` returned.
+/// Runs `work` on the file's connection, opening it first if needed, as
+/// `servers::with` does for a server. The connection goes back to its slot
+/// when `work` succeeds or refuses the request itself (4xx). It is closed
+/// when the database or the driver failed, or when `work` cleared `keep`:
+/// it left a statement running that SQLite cannot stop (a count past its
+/// limit). A request that is dropped drops the connection with it.
+///
+/// A file that is replaced while it is open is read from the old one until
+/// the window closes or the idle time ends; one Laravel changes in place
+/// (a migration) is read as it is now.
 async fn with_file<T>(
+    daemon: &Daemon,
     file: &Path,
-    work: impl AsyncFnOnce(&mut SqliteConnection) -> Result<T, HttpError>,
+    work: impl AsyncFnOnce(&mut SqliteConnection, &mut bool) -> Result<T, HttpError>,
 ) -> Result<T, HttpError> {
-    let mut connection = open(file).await?;
-    let result = work(&mut connection).await;
-    let _ = connection.close().await;
+    let slot = daemon.db_browser().file_slot(file, daemon);
+    // The token of the source: held across `.await` on purpose (store.rs).
+    let mut held = slot.lock().await;
+    let mut connection = match held.take() {
+        Some(connection) => connection,
+        None => open(file).await?,
+    };
+    let mut keep = true;
+    let result = work(&mut connection, &mut keep).await;
+    let known = match &result {
+        Ok(_) => true,
+        Err(err) => err.status.is_client_error(),
+    };
+    if keep && known {
+        *held = Some(connection);
+    } else {
+        let _ = connection.close().await;
+    }
     result
 }
 
-/// The tables and views of `file`.
-pub(super) async fn tables(file: PathBuf) -> Result<DbTables, HttpError> {
-    with_file(&file, async |connection| read_tables(connection).await).await
+pub(super) async fn tables(daemon: &Daemon, file: PathBuf) -> Result<DbTables, HttpError> {
+    with_file(daemon, &file, async |connection, _| {
+        read_tables(connection).await
+    })
+    .await
 }
 
 async fn read_tables(connection: &mut SqliteConnection) -> Result<DbTables, HttpError> {
@@ -180,8 +211,12 @@ async fn read_columns(
 }
 
 /// `POST /v1/db/table` for a site's file.
-pub(super) async fn table(file: PathBuf, table: DbTableRef) -> Result<DbTable, HttpError> {
-    with_file(&file, async |connection| {
+pub(super) async fn table(
+    daemon: &Daemon,
+    file: PathBuf,
+    table: DbTableRef,
+) -> Result<DbTable, HttpError> {
+    with_file(daemon, &file, async |connection, _| {
         let (_, columns, _) = read_columns(connection, &table).await?;
         Ok(DbTable { columns })
     })
@@ -189,8 +224,12 @@ pub(super) async fn table(file: PathBuf, table: DbTableRef) -> Result<DbTable, H
 }
 
 /// `POST /v1/db/rows` for a site's file: one page, read row by row.
-pub(super) async fn page(file: PathBuf, request: DbRowsRequest) -> Result<DbPage, HttpError> {
-    with_file(&file, async |connection| {
+pub(super) async fn page(
+    daemon: &Daemon,
+    file: PathBuf,
+    request: DbRowsRequest,
+) -> Result<DbPage, HttpError> {
+    with_file(daemon, &file, async |connection, keep| {
         let (info, columns, key) = read_columns(connection, &request.table).await?;
         rows::check_sort(&columns, request.sort.as_ref())?;
         let sql = db_browser::page_sql(
@@ -215,9 +254,10 @@ pub(super) async fn page(file: PathBuf, request: DbRowsRequest) -> Result<DbPage
         }
         let seen = request.offset.saturating_add(found.len() as u64);
         let total = if request.count {
-            count(connection, &request.table)
-                .await?
-                .unwrap_or_else(|| rows::estimated(info.estimate, seen))
+            let counted = count(connection, &request.table).await?;
+            // Past its limit the count still runs in the driver.
+            *keep = counted.is_some();
+            counted.unwrap_or_else(|| rows::estimated(info.estimate, seen))
         } else {
             rows::estimated(info.estimate, seen)
         };
@@ -233,7 +273,8 @@ pub(super) async fn page(file: PathBuf, request: DbRowsRequest) -> Result<DbPage
 }
 
 /// The exact number of rows, or `None` past [`COUNT_LIMIT`]. Last on the
-/// connection: SQLite cannot stop it, so the connection closes after it.
+/// connection: SQLite cannot stop it, so past the limit the connection
+/// closes after it.
 async fn count(
     connection: &mut SqliteConnection,
     table: &DbTableRef,
@@ -256,8 +297,12 @@ async fn count(
 
 /// `POST /v1/db/cell` for a site's file: the whole value, up to
 /// `VALUE_BYTES`, by the row's primary key, whose values are bound.
-pub(super) async fn cell(file: PathBuf, request: DbCellRequest) -> Result<DbValue, HttpError> {
-    with_file(&file, async |connection| {
+pub(super) async fn cell(
+    daemon: &Daemon,
+    file: PathBuf,
+    request: DbCellRequest,
+) -> Result<DbValue, HttpError> {
+    with_file(daemon, &file, async |connection, _| {
         let (_, columns, key) = read_columns(connection, &request.table).await?;
         rows::check_cell(Engine::Sqlite, &columns, &key, &request)?;
         let sql =

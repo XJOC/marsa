@@ -43,6 +43,7 @@ mod sqlite;
 mod store;
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,8 @@ use marsa_core::types::{
     DbServerInfo, DbSource, DbSources, DbTable, DbTableRequest, DbTables, DbTablesRequest, DbValue,
     JobAccepted, JobKind, JobOutcome,
 };
+use sqlx::Connection;
+use sqlx::sqlite::SqliteConnection;
 use tracing::info;
 
 use crate::daemon::http::Rejected;
@@ -75,11 +78,16 @@ const COUNT_LIMIT: Duration = Duration::from_secs(2);
 /// How long a server connection stays open with no request.
 const IDLE: Duration = Duration::from_secs(60);
 
-/// What the browser keeps in `marsad`: its server connections
-/// ([`store`]). Made by the first request that needs one, so an idle
-/// `marsad` holds nothing of it. SQLite files are never kept open.
+/// What the browser keeps in `marsad`: its connections ([`store`]). Made
+/// by the first request that needs one, so an idle `marsad` holds nothing
+/// of it. A SQLite file stays open while the window browses it, as a
+/// server's database does: a connection for each request started a driver
+/// thread for each, and on Linux the allocator kept memory for each thread
+/// (ADR 0028, Evidence). `close` and the idle time close it, and the file
+/// can then be deleted.
 pub(crate) struct Browser {
-    store: Arc<store::Store<servers::Conn>>,
+    store: Arc<store::Store<store::ServerKey, servers::Conn>>,
+    files: Arc<store::Store<PathBuf, SqliteConnection>>,
     queries: query::Queries,
 }
 
@@ -94,6 +102,7 @@ impl Default for Browser {
     fn default() -> Self {
         Self {
             store: Arc::new(store::Store::new(IDLE)),
+            files: Arc::new(store::Store::new(IDLE)),
             queries: query::Queries::default(),
         }
     }
@@ -102,7 +111,7 @@ impl Default for Browser {
 impl Browser {
     /// The slot of `key`; the first one starts the task that closes idle
     /// connections.
-    fn slot(&self, key: store::Key, daemon: &Daemon) -> store::Slot<servers::Conn> {
+    fn slot(&self, key: store::ServerKey, daemon: &Daemon) -> store::Slot<servers::Conn> {
         let (slot, start) = self.store.slot(&key);
         if start {
             self.store.spawn_reaper(daemon.shutdown().clone());
@@ -113,12 +122,32 @@ impl Browser {
     /// Closes the connections to `kind`, before it stops.
     pub(crate) fn close_server(&self, kind: ServerKind) {
         if let Some(server) = DbServer::ALL.into_iter().find(|s| s.kind() == kind) {
-            self.store.close_server(server);
+            self.store.close_where(|(s, _)| *s == server);
         }
     }
 
-    pub(crate) fn close_all(&self) {
+    /// The slot of a site's SQLite file, as [`Self::slot`] is for a
+    /// server's database.
+    fn file_slot(&self, file: &std::path::Path, daemon: &Daemon) -> store::Slot<SqliteConnection> {
+        let (slot, start) = self.files.slot(&file.to_path_buf());
+        if start {
+            self.files.spawn_reaper(daemon.shutdown().clone());
+        }
+        slot
+    }
+
+    /// Closes every connection. A file's connection is closed and waited
+    /// for: the driver closes a dropped one later, on its own thread, and
+    /// until then Windows refuses to delete the file. A request that runs on
+    /// one ends first.
+    pub(crate) async fn close_all(&self) {
         self.store.close_all();
+        for slot in self.files.take_all() {
+            let taken = slot.lock().await.take();
+            if let Some(connection) = taken {
+                let _ = connection.close().await;
+            }
+        }
     }
 }
 
@@ -211,7 +240,7 @@ async fn tables(
     let tables = match &source {
         DbSource::SiteFile { site } => {
             let file = sqlite::site_file(&daemon, site).await?;
-            within(sqlite::tables(file)).await?
+            within(sqlite::tables(&daemon, file)).await?
         }
         // One limit for the whole request: the wait for the source, two
         // connections, and their reads.
@@ -237,7 +266,7 @@ async fn table(
     let answer = match &source {
         DbSource::SiteFile { site } => {
             let file = sqlite::site_file(&daemon, site).await?;
-            within(sqlite::table(file, table)).await?
+            within(sqlite::table(&daemon, file, table)).await?
         }
         DbSource::Server { server, database } => {
             within(async {
@@ -264,7 +293,7 @@ async fn rows(
     let page = match &source {
         DbSource::SiteFile { site } => {
             let file = sqlite::site_file(&daemon, site).await?;
-            within(sqlite::page(file, request)).await?
+            within(sqlite::page(&daemon, file, request)).await?
         }
         DbSource::Server { server, database } => {
             within(async {
@@ -291,7 +320,7 @@ async fn cell(
     let value = match &source {
         DbSource::SiteFile { site } => {
             let file = sqlite::site_file(&daemon, site).await?;
-            within(sqlite::cell(file, request)).await?
+            within(sqlite::cell(&daemon, file, request)).await?
         }
         DbSource::Server { server, database } => {
             within(async {
@@ -406,7 +435,7 @@ async fn listed_database(
 /// open between requests.
 async fn close(State(daemon): State<Arc<Daemon>>) -> StatusCode {
     if let Some(browser) = daemon.open_db_browser() {
-        browser.close_all();
+        browser.close_all().await;
         browser.queries.cancel_all();
         browser.queries.drop_results();
     }

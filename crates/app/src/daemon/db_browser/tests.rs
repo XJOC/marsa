@@ -863,3 +863,45 @@ fn a_server_connection_keeps_few_prepared_statements() {
     assert!(format!("{:?}", servers::mysql_options(3306, Some("shop"))).contains(&kept));
     assert!(format!("{:?}", servers::pg_options(5432, None)).contains(&kept));
 }
+
+#[tokio::test]
+async fn a_site_file_stays_open_while_browsed_and_close_closes_it() {
+    let app = App::new();
+    let root = app.site("blog").await;
+    let file = make_file(&root, SHOP).await;
+    let files = &app.daemon.db_browser().files;
+    assert!(files.open().is_empty(), "nothing opens before a request");
+    for _ in 0..3 {
+        let (status, json) = app.tables(blog()).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+    assert_eq!(files.open(), [file], "one connection for the file");
+    let response = app.router.send("POST", "/v1/db/close", None).await;
+    assert!(response.status().is_success());
+    assert!(files.open().is_empty());
+}
+
+#[tokio::test]
+async fn an_open_file_shows_what_the_site_wrote_since() {
+    let app = App::new();
+    let root = app.site("blog").await;
+    let file = make_file(&root, SHOP).await;
+    let rows = || async {
+        let body = json!({ "source": blog(), "table": { "name": "users" }, "offset": 0 });
+        let (status, json) = app.router.answer("POST", "/v1/db/rows", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        json["rows"].as_array().expect("rows").len()
+    };
+    assert_eq!(rows().await, 1);
+    let mut writer = SqliteConnectOptions::new()
+        .filename(&file)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::raw_sql("INSERT INTO users (email) VALUES ('grace@example.test')")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    writer.close().await.unwrap();
+    assert_eq!(rows().await, 2, "the open connection reads the new row");
+}
