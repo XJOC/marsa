@@ -149,6 +149,10 @@ impl DbBrowserState {
             if info.problem.as_deref() == Some(marsa_core::codes::DB_SIGN_IN_FAILED) {
                 return DbScreen::SignInFailed(info.server);
             }
+            // Its list is read again once it runs (`db_sources_changed`).
+            if info.state == ServiceState::Starting {
+                return DbScreen::Loading;
+            }
             if info.state != ServiceState::Running {
                 return DbScreen::Stopped(info.server);
             }

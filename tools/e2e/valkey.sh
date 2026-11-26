@@ -226,13 +226,15 @@ run marsa daemon stop
 run marsa daemon start
 started=false
 for _ in $(seq 1 30); do
-  if marsa services | grep -qE '^valkey +running' && [ "$(cli ping 2>/dev/null)" = PONG ]; then
+  if marsa services | grep -qE '^valkey +running'; then
     started=true
     break
   fi
   sleep 1
 done
 [ "$started" = true ] || fail "valkey did not start with marsad"
+# No retry: `running` means the server takes commands.
+[ "$(cli ping)" = PONG ] || fail "valkey is running and does not answer"
 [ "$(cli get marsa-e2e)" = kept ] || fail "the data did not survive"
 
 step "marsad killed: the next start stops our old valkey-server with SIGTERM, which saves"

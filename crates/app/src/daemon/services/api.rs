@@ -846,9 +846,9 @@ mod tests {
         // Caddy first: about 23.
         assert!(OLD_ACTION_WAIT > ACTION_WAIT.as_secs() + 23);
         // PostgreSQL: waiting 30, stopping 23, then lsof 8, initdb 120,
-        // single-user 60, ready 15, and the stop of a server that never
+        // single-user 60, ready 30, and the stop of a server that never
         // answered, 23.
-        assert!(OLD_SERVER_WAIT > SERVER_ACTION_WAIT.as_secs() + 23 + 8 + 120 + 60 + 15 + 23);
+        assert!(OLD_SERVER_WAIT > SERVER_ACTION_WAIT.as_secs() + 23 + 8 + 120 + 60 + 30 + 23);
         // MySQL: waiting 30, stopping 35, lsof 8, init 120, ready 15, stop 35.
         assert!(OLD_SERVER_WAIT > SERVER_ACTION_WAIT.as_secs() + 35 + 8 + 120 + 15 + 35);
         // Valkey: waiting 30, stopping 29 (the request, SIGTERM, and the

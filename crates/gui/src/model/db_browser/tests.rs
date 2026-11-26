@@ -155,6 +155,15 @@ fn a_stopped_server_and_a_refused_sign_in_say_so() {
         DbScreen::Stopped(DbServer::Postgres)
     );
 
+    // Not stopped: it takes no connections yet, so there is nothing to start.
+    let mut model = connected();
+    let starting = DbSources {
+        servers: vec![server(DbServer::Postgres, ServiceState::Starting, &[])],
+        files: Vec::new(),
+    };
+    opened(&mut model, starting);
+    assert_eq!(model.session.db.screen(), DbScreen::Loading);
+
     let mut model = connected();
     let mut refused = server(DbServer::Mysql, ServiceState::Running, &[]);
     refused.problem = Some(DB_SIGN_IN_FAILED.into());

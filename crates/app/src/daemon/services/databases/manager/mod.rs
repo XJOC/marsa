@@ -36,10 +36,12 @@ use crate::daemon::state::Daemon;
 use prepare::Prepared;
 use run::Ready;
 
-/// How long a start waits for the server to take connections. A test
-/// measured 50 to 690 ms. The postmaster answers before it recovers its data
-/// after a crash, so a long recovery does not count against this.
+/// How long a start waits for the server to take connections.
 const READY_LIMIT: Duration = Duration::from_secs(15);
+/// PostgreSQL's: a test measured 50 to 690 ms, but after a crash it takes no
+/// session until its recovery is done. Bounded by the wait of old clients
+/// (`services::api::SERVER_ACTION_WAIT`'s test).
+const POSTGRES_READY_LIMIT: Duration = Duration::from_secs(30);
 /// MySQL's: its InnoDB start can take 20 s or more on a slow disk, after a
 /// forced kill (Windows, where the servers end with `marsad`) or on a first
 /// start after an install. The server is still starting then, not failing.
@@ -56,7 +58,7 @@ pub struct ServerManager {
     /// Who runs under a pid and who holds a port. Tests put a fake here.
     pub(super) probes: Arc<dyn ProcessProbe>,
     /// How long a start waits for the server to take connections.
-    ready_limit: Duration,
+    pub(super) ready_limit: Duration,
     /// The system whose programs run: [`Platform::current`].
     platform: Option<Platform>,
     /// How an old server that a crashed `marsad` left running is stopped
@@ -95,7 +97,8 @@ impl ServerManager {
             probes: Arc::new(SystemProbe),
             ready_limit: match kind {
                 ServerKind::Mysql => MYSQL_READY_LIMIT,
-                ServerKind::Postgres | ServerKind::Valkey | ServerKind::Mailpit => READY_LIMIT,
+                ServerKind::Postgres => POSTGRES_READY_LIMIT,
+                ServerKind::Valkey | ServerKind::Mailpit => READY_LIMIT,
             },
             platform: Platform::current(),
             orphan_ladder: kind.stop(),
@@ -103,7 +106,9 @@ impl ServerManager {
             started: Mutex::default(),
             ready: Mutex::default(),
             starting: Mutex::default(),
-            runtime: Arc::new(Mutex::new(ServiceRuntime::new(ServiceId::Database(kind)))),
+            runtime: Arc::new(Mutex::new(ServiceRuntime::awaiting_ready(
+                ServiceId::Database(kind),
+            ))),
             busy: Arc::default(),
         }
     }
@@ -415,9 +420,10 @@ impl ServerManager {
                 let server = self.kind.id();
                 info!(port, server, "it takes connections");
                 *lock(&self.ready) = Some(port);
-                // The record comes first, so a crash of `marsad` once a
-                // start said "running" leaves the server recorded.
+                // The record comes first, so a crash of `marsad` once the
+                // status says "running" leaves the server recorded.
                 let settled = orphan::settled(recorded).await;
+                lock(&self.runtime).set_ready(daemon.events());
                 if process::DATABASE_ORPHAN_RECOVERY && settled == orphan::Recorded::Never {
                     warn!(
                         server,
