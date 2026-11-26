@@ -338,18 +338,14 @@ pub async fn start(addr: SocketAddr, shutdown: &CancellationToken) -> anyhow::Re
     Ok(DnsServer { addr, cancel, task })
 }
 
-/// How often port 0 may pick a port that one of the two protocols refuses.
+/// How often port 0 may pick a number that the other protocol refuses.
 const PICK_TRIES: usize = 50;
 
 /// Binds UDP and TCP on the same port.
 ///
-/// With port 0 the system picks: TCP first, because on Windows a range of
-/// TCP ports can be reserved (`WSAEACCES`, os error 10013) and the system
-/// never hands out a reserved TCP port, then UDP on the same number. A number
-/// UDP refuses is dropped and a new one picked. Picking UDP first failed on
-/// Windows CI even after 10 tries: UDP ports come in sequence, often inside
-/// the same reserved TCP range. A fixed port fails at once, so the caller can
-/// name it.
+/// With port 0 the system picks the number for one protocol and the other
+/// binds it too ([`pick`]); the two take turns ([`in_turn`]). A fixed port
+/// fails at once, so the caller can name it.
 async fn bind_both(addr: SocketAddr) -> anyhow::Result<(UdpSocket, TcpListener)> {
     if addr.port() != 0 {
         let failed = |protocol| {
@@ -365,27 +361,68 @@ async fn bind_both(addr: SocketAddr) -> anyhow::Result<(UdpSocket, TcpListener)>
             .map_err(failed(Protocol::Tcp))?;
         return Ok((udp, tcp));
     }
-    let mut tries = 0;
-    loop {
-        let tcp = TcpListener::bind(addr)
-            .await
-            .with_context(|| format!("cannot bind TCP {addr}"))?;
-        let picked = tcp.local_addr().context("no local TCP address")?;
-        match UdpSocket::bind(picked).await {
-            Ok(udp) => return Ok((udp, tcp)),
-            Err(_) if tries + 1 < PICK_TRIES => tries += 1,
-            Err(err) => {
-                return Err(anyhow::Error::new(err).context(format!("cannot bind UDP {picked}")));
-            }
+    in_turn(|picker| pick(picker, addr)).await
+}
+
+/// Calls `pick` for TCP, UDP, TCP and so on, until one call succeeds, and
+/// gives the last error after [`PICK_TRIES`] calls.
+///
+/// On Windows a range of ports can be reserved for one protocol only
+/// (`WSAEACCES`, os error 10013), and the system gives out numbers in
+/// sequence. So every number picked for one protocol can fall inside a range
+/// that the other refuses: this happened with 50 picks by TCP, and with 10 by
+/// UDP. Each protocol has a sequence of its own.
+async fn in_turn<T, F>(mut pick: impl FnMut(Protocol) -> F) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    let mut refused = None;
+    for picker in [Protocol::Tcp, Protocol::Udp]
+        .into_iter()
+        .cycle()
+        .take(PICK_TRIES)
+    {
+        match pick(picker).await {
+            Ok(picked) => return Ok(picked),
+            Err(err) => refused = Some(err),
+        }
+    }
+    Err(refused.expect("PICK_TRIES is above zero"))
+}
+
+/// The system picks a free number for `picker` on `any` (port 0), and the
+/// other protocol binds the same one.
+async fn pick(picker: Protocol, any: SocketAddr) -> anyhow::Result<(UdpSocket, TcpListener)> {
+    let failed = |protocol: Protocol, addr| move || format!("cannot bind {protocol} {addr}");
+    match picker {
+        Protocol::Tcp => {
+            let tcp = TcpListener::bind(any)
+                .await
+                .with_context(failed(Protocol::Tcp, any))?;
+            let picked = tcp.local_addr().context("no local TCP address")?;
+            let udp = UdpSocket::bind(picked)
+                .await
+                .with_context(failed(Protocol::Udp, picked))?;
+            Ok((udp, tcp))
+        }
+        Protocol::Udp => {
+            let udp = UdpSocket::bind(any)
+                .await
+                .with_context(failed(Protocol::Udp, any))?;
+            let picked = udp.local_addr().context("no local UDP address")?;
+            let tcp = TcpListener::bind(picked)
+                .await
+                .with_context(failed(Protocol::Tcp, picked))?;
+            Ok((udp, tcp))
         }
     }
 }
 
 /// A UDP socket and a TCP listener on one loopback port that both
 /// protocols accept, for a test to hold and then let go of, so that a start
-/// on that port can bind both. A UDP port picked alone may sit in a range of
-/// TCP ports that Windows reserves ([`bind_both`]): a start there fails with
-/// `dns_start_failed` once the UDP socket is gone.
+/// on that port can bind both. A port picked for one protocol alone may sit
+/// in a range that Windows reserves for the other ([`in_turn`]): a start there
+/// fails with `dns_start_failed`.
 #[cfg(test)]
 pub(crate) async fn held_dns_port() -> (std::net::UdpSocket, std::net::TcpListener) {
     let any = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
@@ -792,10 +829,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_protocols_take_turns_to_pick_a_port() {
+        // As on Windows when one protocol's numbers are all refused.
+        for works in [Protocol::Tcp, Protocol::Udp] {
+            let picked = in_turn(|picker| async move {
+                anyhow::ensure!(picker == works, "refused");
+                Ok(picker)
+            });
+            assert_eq!(picked.await.unwrap(), works);
+        }
+        let mut calls = 0;
+        let none: anyhow::Result<()> = in_turn(|_| {
+            calls += 1;
+            std::future::ready(Err(anyhow::anyhow!("refused {calls}")))
+        })
+        .await;
+        assert_eq!(none.unwrap_err().to_string(), "refused 50");
+        assert_eq!(calls, PICK_TRIES);
+    }
+
+    /// Unix only: Windows may refuse every number one protocol picks.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn either_protocol_picks_one_port_for_both() {
+        for first in [Protocol::Tcp, Protocol::Udp] {
+            // Another program may hold the number for the other protocol.
+            let (udp, tcp) = in_turn(|_| pick(first, any_port())).await.unwrap();
+            let addr = udp.local_addr().unwrap();
+            assert_eq!(addr, tcp.local_addr().unwrap(), "{first}");
+            assert!(addr.ip().is_loopback() && addr.port() != 0, "{addr}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_held_tcp_port_fails_too_and_frees_the_udp_one() {
         let shutdown = CancellationToken::new();
         let events = broadcast::channel(64).0;
-        let tcp = std::net::TcpListener::bind(any_port()).unwrap();
+        // A number UDP accepts, so the start gets as far as the held TCP one.
+        let (udp, tcp) = held_dns_port().await;
+        drop(udp);
         let addr = tcp.local_addr().unwrap();
         let service = DnsService::new(Some(addr));
         let status = service.run(&events, &shutdown, ServiceAction::Start).await;
