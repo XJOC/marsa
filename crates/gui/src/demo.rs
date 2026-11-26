@@ -1,5 +1,5 @@
 //! Debug builds only: fixed fake data for the design review.
-//! `MARSA_GUI_DEMO=ok|caddy-stopped|many-sites|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|mail|mail-empty|mail-stopped|dumps|dumps-empty|dumps-off|dumps-busy|dumps-long|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
+//! `MARSA_GUI_DEMO=ok|caddy-stopped|many-sites|first-run-1|first-run-2|sites-search|sites-empty|sites-extras|site-parked|site-workers|runtimes|runtimes-installing|runtimes-install|settings|settings-setup|services|logs|logs-filtered|logs-no-match|logs-long|logs-laravel|logs-laravel-errors|mail|mail-empty|mail-stopped|dumps|dumps-empty|dumps-off|dumps-busy|dumps-long|confirm-delete-mail|confirm-unlink|confirm-uninstall|notice-success|notice-error`
 //! fills the model with a few sites, PHP and Caddy (or nothing, for the
 //! first run), and starts no bridge and no daemon: the window draws a state the review needs without a
 //! machine to break. Pair it with
@@ -26,6 +26,8 @@ use crate::model::{
 mod databases;
 mod dumps;
 mod mail;
+mod site_log;
+mod workers;
 
 /// The variable that names the state.
 const VAR: &str = "MARSA_GUI_DEMO";
@@ -57,6 +59,10 @@ pub enum Demo {
     /// The same as `Ok`, with `~/Code` parked: the sites in it come from that
     /// folder, so their pages cannot unlink them.
     SiteParked,
+    /// The same as `Ok`, with the workers of `shop` (queue running,
+    /// scheduler off) and of `billing-api` (queue failed, scheduler
+    /// starting): the Workers card of their pages.
+    SiteWorkers,
     /// The same as `Ok`, with Node.js and Composer listed too, and the Xdebug
     /// state read: the Runtimes screen.
     Runtimes,
@@ -86,6 +92,12 @@ pub enum Demo {
     /// `Logs` whose PHP 8.4 pool wrote a line wider than the window: open the
     /// pool's log and scroll sideways to read it.
     LogsLong,
+    /// The same as `Ok`, with `shop` and `billing-api` the Laravel sites, and
+    /// `shop`'s own log followed: an error with its stack trace among the
+    /// entries. Open it with `MARSA_GUI_ROUTE=logs:site:shop`.
+    LogsLaravel,
+    /// `LogsLaravel` with Info and Warning off: the error and its trace.
+    LogsLaravelErrors,
     /// The same as `Ok`, with Mailpit installed and running: five mails of
     /// 214, three new, the newest opened.
     Mail,
@@ -144,6 +156,7 @@ fn parse(name: &str) -> Option<Demo> {
         "sites-empty" => Demo::SitesEmpty,
         "sites-extras" => Demo::SitesExtras,
         "site-parked" => Demo::SiteParked,
+        "site-workers" => Demo::SiteWorkers,
         "runtimes" => Demo::Runtimes,
         "runtimes-installing" => Demo::RuntimesInstalling,
         "runtimes-install" => Demo::RuntimesInstall,
@@ -154,6 +167,8 @@ fn parse(name: &str) -> Option<Demo> {
         "logs-filtered" => Demo::LogsFiltered,
         "logs-no-match" => Demo::LogsNoMatch,
         "logs-long" => Demo::LogsLong,
+        "logs-laravel" => Demo::LogsLaravel,
+        "logs-laravel-errors" => Demo::LogsLaravelErrors,
         "mail" => Demo::Mail,
         "mail-empty" => Demo::MailEmpty,
         "mail-stopped" => Demo::MailStopped,
@@ -236,6 +251,9 @@ pub fn fill(model: &mut Model, demo: Demo) {
     if demo == Demo::SiteParked {
         model.session.sites.parked = vec![PathBuf::from("/demo/Code")];
     }
+    if demo == Demo::SiteWorkers {
+        workers::fill(model);
+    }
     if matches!(
         demo,
         Demo::Runtimes | Demo::RuntimesInstalling | Demo::RuntimesInstall | Demo::ConfirmUninstall
@@ -254,6 +272,9 @@ pub fn fill(model: &mut Model, demo: Demo) {
         Demo::Logs | Demo::LogsFiltered | Demo::LogsNoMatch | Demo::LogsLong
     ) {
         logs_screen(model, demo);
+    }
+    if matches!(demo, Demo::LogsLaravel | Demo::LogsLaravelErrors) {
+        site_log::fill(model, demo);
     }
     if matches!(
         demo,
@@ -701,6 +722,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_workers_demo_shows_each_state_of_the_card() {
+        use marsa_core::types::{SiteKey, WorkerKind};
+
+        assert_eq!(parse("site-workers"), Some(Demo::SiteWorkers));
+        let mut model = Model::default();
+        fill(&mut model, Demo::SiteWorkers);
+        let state = |kind, site| {
+            let key = SiteKey::new(site).expect("a demo site");
+            model
+                .worker_status(kind, key)
+                .map(|status| status.state.clone())
+        };
+        assert_eq!(
+            state(WorkerKind::Queue, "shop"),
+            Some(ServiceState::Running)
+        );
+        assert_eq!(state(WorkerKind::Schedule, "shop"), None);
+        let failed = ServiceState::Failed {
+            code: "worker_failed".into(),
+        };
+        assert_eq!(state(WorkerKind::Queue, "billing-api"), Some(failed));
+        assert_eq!(state(WorkerKind::Schedule, "billing-api"), None);
+        let sites = &model.session.sites.sites;
+        let billing = sites.iter().find(|site| site.name == "billing-api");
+        assert!(billing.is_some_and(|site| site.queue && site.schedule));
+        let failed = id("queue-billing-api");
+        assert_eq!(model.log_rows(failed).len(), 3);
+    }
+
+    #[test]
     fn the_many_sites_demo_has_twelve_sites_and_four_php_versions() {
         assert_eq!(parse("many-sites"), Some(Demo::ManySites));
         let mut model = Model::default();
@@ -738,6 +789,8 @@ mod tests {
         assert_eq!(parse("logs-filtered"), Some(Demo::LogsFiltered));
         assert_eq!(parse("logs-no-match"), Some(Demo::LogsNoMatch));
         assert_eq!(parse("logs-long"), Some(Demo::LogsLong));
+        assert_eq!(parse("logs-laravel"), Some(Demo::LogsLaravel));
+        assert_eq!(parse("logs-laravel-errors"), Some(Demo::LogsLaravelErrors));
         assert_eq!(parse("on fire"), None);
     }
 
@@ -876,13 +929,53 @@ mod tests {
     }
 
     #[test]
+    fn the_laravel_log_demos_follow_shops_log_and_the_errors_one_keeps_the_trace() {
+        use crate::model::{LogSource, Route};
+        use crate::screens::logs::{Body, view};
+        let shop = LogSource::Site("shop".into());
+        let mut model = Model::default();
+        fill(&mut model, Demo::LogsLaravel);
+        // Four sources: the segmented control, as in the mockup.
+        let all = view(&model, &shop);
+        let names: Vec<_> = all.sources.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Caddy",
+                "PHP-FPM 8.4",
+                "Laravel · billing-api",
+                "Laravel · shop"
+            ]
+        );
+        let Body::Lines(lines) = &all.body else {
+            panic!("lines");
+        };
+        assert_eq!(lines.len(), 15);
+        // The window opened on that log follows it: nothing more to ask.
+        model.route = Route::Logs(shop.clone());
+        assert!(model.next_command().is_none());
+        // The other Laravel site has no log yet.
+        let none = view(&model, &LogSource::Site("billing-api".into()));
+        assert_eq!(none.body, Body::NoSiteLog);
+        let mut errors = Model::default();
+        fill(&mut errors, Demo::LogsLaravelErrors);
+        let Body::Lines(lines) = view(&errors, &shop).body else {
+            panic!("lines");
+        };
+        // The error, its trace, and nothing else.
+        assert_eq!(lines.len(), 8);
+        assert!((0..lines.len()).all(|n| lines.get(n).level == LogLevel::Error));
+    }
+
+    #[test]
     fn the_logs_demos_have_a_log_for_caddy_and_a_pool_and_the_filtered_one_hides_info() {
         use crate::model::LogSource;
         use crate::screens::logs::{Body, view};
         let mut model = Model::default();
         fill(&mut model, Demo::Logs);
         let all = view(&model, &LogSource::Caddy);
-        assert_eq!(all.sources.len(), 3);
+        // Caddy and two pools, then the log of each of the six Laravel sites.
+        assert_eq!(all.sources.len(), 3 + 6);
         let Body::Lines(lines) = &all.body else {
             panic!("lines");
         };

@@ -85,6 +85,9 @@ pub struct Session {
     pub services: Vec<ServiceStatus>,
     /// The log of each service that has written one, by the service's id.
     pub(super) logs: BTreeMap<ServiceId, ServiceLog>,
+    /// The log of the Laravel site that Logs shows, while the bridge
+    /// follows it. Kept while the daemon is gone, as the services' logs are.
+    pub(super) site_log: Option<SiteLogState>,
     /// Sites sorted by name, the parked folders, and the skipped folders.
     pub sites: SiteList,
     /// As the daemon lists them.
@@ -119,6 +122,9 @@ pub struct Session {
     pub db: DbBrowserState,
     /// The dumps `marsad` caught, as last read.
     pub dumps: DumpsState,
+    /// The workers whose switch sent a change, by id, with the setting it
+    /// asked for: until the site list has it, the switch waits.
+    pub(super) workers_asked: BTreeMap<ServiceId, bool>,
 }
 
 impl Model {
@@ -174,5 +180,6 @@ impl Model {
         self.session.mail = MailState::default();
         self.session.db = DbBrowserState::default();
         self.session.dumps = DumpsState::default();
+        self.session.workers_asked.clear();
     }
 }

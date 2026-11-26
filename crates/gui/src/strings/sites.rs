@@ -54,6 +54,8 @@ pub fn php_for_site(site: &str) -> String {
 /// word `SITES` after an arrow icon.
 pub const OPEN_FOLDER: &str = "Open folder";
 pub const OPEN_IN_BROWSER: &str = "Open in browser";
+/// On a Laravel site's page: Logs, on the site's own log.
+pub const OPEN_LOG: &str = "Open log";
 /// The heading of the large version picker of the page, and its name for a
 /// screen reader.
 pub const PHP_FOR_THIS_SITE: &str = "PHP for this site";
@@ -72,6 +74,32 @@ pub const ADDED_AS_LINKED: &str = "Linked folder";
 /// `~/Code`).
 pub fn added_as_parked(shown: &str) -> String {
     format!("Part of parked folder {shown}")
+}
+
+/// The Workers card of a Laravel site's page: its heading, the name of
+/// each worker (its row's label, and its switch's name for a screen
+/// reader), and the line under it.
+pub const WORKERS: &str = "Workers";
+pub const WORKER_QUEUE: &str = "Queue worker";
+pub const WORKER_SCHEDULE: &str = "Scheduler";
+pub const WORKERS_HELP: &str = "Runs php artisan queue:work and schedule:work with this site's \
+     PHP. Marsa restarts them if they crash.";
+/// The button of a worker's row: Logs, on the worker's own log.
+pub const WORKER_LOG: &str = "Log";
+/// Why "Log" is off: no worker has run, so there is no log.
+pub const WORKER_LOG_OFF_HINT: &str = "No log yet: the worker has not run.";
+/// Why a worker's switch is off: its change is on its way to the daemon.
+pub const WORKER_SAVING_HINT: &str = "Saving…";
+
+/// The line under the Workers card for a worker that failed with `code`.
+pub fn worker_failure(name: &str, code: &str) -> String {
+    let why = match code {
+        "worker_failed" => {
+            "Stopped after repeated crashes. Check the log, then turn it on again.".to_owned()
+        }
+        code => error_text(code),
+    };
+    format!("{name}: {why}")
 }
 
 /// Between the reason after a heading and the link that follows it: "8.3 is

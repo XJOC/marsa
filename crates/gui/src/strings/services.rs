@@ -39,6 +39,14 @@ pub fn log_empty(name: &str) -> String {
     format!("{name} has not written anything yet.")
 }
 
+/// A Laravel site's own log among the sources of Logs: "Laravel · shop".
+pub fn site_log_source(site: &str) -> String {
+    format!("Laravel · {site}")
+}
+
+/// The Logs screen on a Laravel site's log while the site has no log file.
+pub const SITE_LOG_EMPTY: &str = "No log yet. It appears when the site writes one.";
+
 /// A level in the filter chips.
 pub const fn log_level_name(level: LogLevel) -> &'static str {
     match level {
@@ -127,3 +135,5 @@ pub const PILL_STOPPED: &str = "Stopped";
 pub const PILL_STARTING: &str = "Starting";
 pub const PILL_STOPPING: &str = "Stopping";
 pub const PILL_FAILED: &str = "Failed";
+/// A site's worker whose switch is off.
+pub const PILL_OFF: &str = "Off";

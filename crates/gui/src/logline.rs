@@ -11,6 +11,10 @@
 //! A line in neither format is plain information with its whole text as the
 //! message: the window does not guess a level from the words in it.
 //!
+//! A Laravel site's own log is read in its own format, and only there
+//! ([`LaravelReader`]): `[2026-11-24 10:15:03] local.ERROR: message`, then
+//! the lines of a stack trace, which go on the entry above them.
+//!
 //! Pure: no drawing and no I/O. [Laravel: a small value parser, like a
 //! `Str` helper.]
 
@@ -180,6 +184,121 @@ pub fn message(text: &str) -> Cow<'_, str> {
     read(text).message
 }
 
+/// The head of an entry of a Laravel log, as Laravel's line formatter
+/// writes it: `[2026-11-24 10:15:03] local.ERROR: Call to undefined method
+/// {"exception":"[object] ..."}`.
+#[derive(Debug, PartialEq, Eq)]
+struct LaravelEntry<'a> {
+    /// What is between the brackets, as written: `2026-11-24 10:15:03`.
+    stamp: &'a str,
+    level: LogLevel,
+    /// What follows the level, the context JSON included: the window does
+    /// not take a message apart. Empty for an entry that says nothing.
+    message: &'a str,
+}
+
+/// The head of a Laravel entry, if `text` is one: a stamp in brackets that
+/// starts with a digit, a channel and a dot (the environment, such as
+/// `local`; a line without one is read too), then one of the eight levels of
+/// PSR-3 and a colon. `[stacktrace]` and `[previous exception]` start with
+/// no digit, so they are never a head.
+fn laravel_entry(text: &str) -> Option<LaravelEntry<'_>> {
+    let (stamp, after) = text.strip_prefix('[')?.split_once("] ")?;
+    if !stamp.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let (head, rest) = after.split_once(':')?;
+    if head.contains(char::is_whitespace) {
+        return None;
+    }
+    let word = match head.rsplit_once('.') {
+        Some(("", _)) => return None,
+        Some((_, word)) => word,
+        None => head,
+    };
+    let level = match word {
+        "DEBUG" | "INFO" | "NOTICE" => LogLevel::Info,
+        "WARNING" => LogLevel::Warning,
+        "ERROR" | "CRITICAL" | "ALERT" | "EMERGENCY" => LogLevel::Error,
+        _ => return None,
+    };
+    // `local.INFO:` with nothing after it is an entry with no message.
+    let message = if rest.is_empty() {
+        rest
+    } else {
+        rest.strip_prefix(' ')?
+    };
+    Some(LaravelEntry {
+        stamp,
+        level,
+        message,
+    })
+}
+
+/// How a line of a Laravel log reads, given the lines before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LaravelLine {
+    pub(crate) level: LogLevel,
+    /// The line goes on the entry above it (its stack trace, the rest of
+    /// its context): it has that entry's level.
+    pub(crate) continuation: bool,
+}
+
+/// Reads a Laravel log one line at a time, oldest first. It keeps the level
+/// of the last entry: a line that does not start an entry goes on it and
+/// takes its level, so a filter on Error keeps an error's stack trace.
+/// [Laravel: `Str::of($line)->match()`, with a memory of the lines before.]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LaravelReader {
+    /// The level of the last entry read. `None` before the first: the read
+    /// may start inside an entry whose head it never saw.
+    entry: Option<LogLevel>,
+}
+
+impl LaravelReader {
+    pub(crate) fn read(&mut self, text: &str) -> LaravelLine {
+        if let Some(entry) = laravel_entry(text) {
+            self.entry = Some(entry.level);
+            return LaravelLine {
+                level: entry.level,
+                continuation: false,
+            };
+        }
+        match self.entry {
+            Some(level) => LaravelLine {
+                level,
+                continuation: true,
+            },
+            // Before any entry: plain information, shown whole.
+            None => LaravelLine {
+                level: LogLevel::Info,
+                continuation: false,
+            },
+        }
+    }
+}
+
+/// How many columns the time column of a log with its own stamps takes: a
+/// Laravel stamp, `2026-11-24 10:15:03`.
+pub const STAMP_COLUMNS: usize = 19;
+
+/// `stamp` cut at [`STAMP_COLUMNS`] characters, for the time column. A
+/// project that writes a longer stamp (`2026-11-24T10:15:03.123456+00:00`)
+/// keeps its date and time; the tooltip has the whole line.
+pub fn stamp_clipped(stamp: &str) -> &str {
+    stamp
+        .char_indices()
+        .nth(STAMP_COLUMNS)
+        .map_or(stamp, |(at, _)| &stamp[..at])
+}
+
+/// What a row of a Laravel log shows: the stamp of an entry, for the time
+/// column, and its message; or no stamp and the whole line, for any other
+/// line.
+pub(crate) fn laravel_shown(text: &str) -> (Option<&str>, &str) {
+    laravel_entry(text).map_or((None, text), |entry| (Some(entry.stamp), entry.message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +384,179 @@ mod tests {
             assert_eq!(level(text), LogLevel::Info, "{text:?}");
             assert_eq!(message(text), text, "{text:?}");
         }
+    }
+
+    /// Each line read in order by one reader: its level, and whether it goes
+    /// on the entry above it.
+    fn laravel(lines: &[&str]) -> Vec<(LogLevel, bool)> {
+        let mut reader = LaravelReader::default();
+        lines
+            .iter()
+            .map(|text| {
+                let line = reader.read(text);
+                (line.level, line.continuation)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_laravel_entry_has_its_level_its_stamp_and_its_message_with_the_context_kept() {
+        let error = r#"[2026-11-24 10:15:03] local.ERROR: Call to undefined method {"exception":"[object]..."} []"#;
+        assert_eq!(
+            laravel_entry(error),
+            Some(LaravelEntry {
+                stamp: "2026-11-24 10:15:03",
+                level: LogLevel::Error,
+                message: r#"Call to undefined method {"exception":"[object]..."} []"#,
+            })
+        );
+        let warning = "[2026-11-24 10:15:03] production.WARNING: Disk almost full";
+        assert_eq!(
+            laravel_shown(warning),
+            (Some("2026-11-24 10:15:03"), "Disk almost full")
+        );
+        let line = |word: &str| format!("[2026-11-24 10:15:03] local.{word}: said");
+        for (word, want) in [
+            ("DEBUG", LogLevel::Info),
+            ("INFO", LogLevel::Info),
+            ("NOTICE", LogLevel::Info),
+            ("WARNING", LogLevel::Warning),
+            ("ERROR", LogLevel::Error),
+            ("CRITICAL", LogLevel::Error),
+            ("ALERT", LogLevel::Error),
+            ("EMERGENCY", LogLevel::Error),
+        ] {
+            let text = line(word);
+            let entry = laravel_entry(&text).expect(word);
+            assert_eq!((entry.level, entry.message), (want, "said"), "{word}");
+        }
+    }
+
+    #[test]
+    fn the_lines_after_an_entry_go_on_it_and_take_its_level() {
+        let lines = [
+            "[2026-11-24 10:15:03] local.ERROR: boom {\"exception\":\"[object] (Error(code: 0): boom at /app/Foo.php:12)",
+            "[stacktrace]",
+            "#0 /app/Foo.php(12): bar()",
+            "#1 {main}",
+            "\"}",
+            "}",
+            "",
+            "[2026-11-24 10:15:04] local.WARNING: slow",
+            "#0 /app/Bar.php(3): baz()",
+            "[2026-11-24 10:15:05] local.INFO: ok",
+            "[previous exception] [object] (Exception(code: 0): first at /app/Foo.php:9)",
+        ];
+        let (error, warning, info) = (LogLevel::Error, LogLevel::Warning, LogLevel::Info);
+        assert_eq!(
+            laravel(&lines),
+            [
+                (error, false),
+                (error, true),
+                (error, true),
+                (error, true),
+                (error, true),
+                (error, true),
+                (error, true),
+                (warning, false),
+                (warning, true),
+                (info, false),
+                (info, true),
+            ]
+        );
+        // A line that goes on an entry is shown whole, with no stamp.
+        assert_eq!(
+            laravel_shown("#0 /app/Foo.php(12): bar()"),
+            (None, "#0 /app/Foo.php(12): bar()")
+        );
+        assert_eq!(laravel_shown("[stacktrace]"), (None, "[stacktrace]"));
+    }
+
+    #[test]
+    fn a_line_before_any_entry_is_information_shown_whole() {
+        // The read started inside an entry whose head it never saw.
+        let lines = [
+            "#3 /app/Old.php(1): old()",
+            "\"}",
+            "",
+            "[2026-11-24 10:15:03] local.ERROR: new",
+        ];
+        assert_eq!(
+            laravel(&lines),
+            [
+                (LogLevel::Info, false),
+                (LogLevel::Info, false),
+                (LogLevel::Info, false),
+                (LogLevel::Error, false),
+            ]
+        );
+        assert_eq!(
+            laravel_shown("#3 /app/Old.php(1): old()"),
+            (None, "#3 /app/Old.php(1): old()")
+        );
+    }
+
+    #[test]
+    fn a_stamp_and_a_level_without_a_channel_is_an_entry_and_odd_heads_are_not() {
+        let bare = laravel_entry("[2026-11-24 10:15:03] ERROR: no channel").expect("an entry");
+        assert_eq!((bare.level, bare.message), (LogLevel::Error, "no channel"));
+        // An ISO stamp, as a project may set it, is kept as written.
+        let iso =
+            laravel_entry("[2026-11-24T10:15:03.123456+00:00] testing.INFO: hi").expect("iso");
+        assert_eq!(iso.stamp, "2026-11-24T10:15:03.123456+00:00");
+        for text in [
+            "[2026-11-24 10:15:03] local.LOUD: an unknown level",
+            "[2026-11-24 10:15:03] local.error: lower case",
+            "[2026-11-24 10:15:03] .ERROR: an empty channel",
+            "[2026-11-24 10:15:03] my env.ERROR: a space in the channel",
+            "[2026-11-24 10:15:03] local.ERROR:no space",
+            "[2026-11-24 10:15:03] no level at all",
+            "[stacktrace]",
+            "[previous exception] [object] (Exception(code: 0): x)",
+            "2026-11-24 10:15:03 local.ERROR: no brackets",
+            "",
+        ] {
+            assert_eq!(laravel_entry(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_laravel_entry_may_have_an_empty_message() {
+        for text in [
+            "[2026-11-24 10:15:03] local.INFO:",
+            "[2026-11-24 10:15:03] local.INFO: ",
+        ] {
+            let entry = laravel_entry(text).expect(text);
+            assert_eq!(
+                (entry.level, entry.message),
+                (LogLevel::Info, ""),
+                "{text:?}"
+            );
+            assert_eq!(laravel_shown(text), (Some("2026-11-24 10:15:03"), ""));
+        }
+    }
+
+    #[test]
+    fn a_stamp_is_cut_at_the_time_column() {
+        assert_eq!(stamp_clipped("2026-11-24 10:15:03"), "2026-11-24 10:15:03");
+        assert_eq!(
+            stamp_clipped("2026-11-24T10:15:03.123456+00:00"),
+            "2026-11-24T10:15:03"
+        );
+        assert_eq!(stamp_clipped("1"), "1");
+        assert_eq!(stamp_clipped(""), "");
+        // Cut on a character, never inside one.
+        let wide = "٢".repeat(STAMP_COLUMNS + 3);
+        assert_eq!(stamp_clipped(&wide).chars().count(), STAMP_COLUMNS);
+    }
+
+    #[test]
+    fn a_laravel_line_in_a_program_log_is_left_as_it_is() {
+        // Caddy's and php-fpm's lines are not read as Laravel's: the format
+        // is read only for a site's own log.
+        let text = "[2026-11-24 10:15:03] local.ERROR: Call to undefined method";
+        assert_eq!(level(text), LogLevel::Info);
+        assert_eq!(message(text), text);
     }
 
     #[test]

@@ -188,6 +188,7 @@ used only once it is installed: `marsa install php 8.3`.
 | `marsa secure <name>`, `marsa unsecure <name>` | Serve a site over HTTPS (the default), or over plain HTTP. |
 | `marsa isolate <name> <version>`, `marsa unisolate <name>` | Give a site its own PHP version, or remove it. |
 | `marsa xdebug [on\|off]` | Turn Xdebug on or off in every installed PHP. |
+| `marsa queue <on\|off> <name>`, `marsa queue status [name]` | Run `php artisan queue:work` for a Laravel site; Marsa restarts it if it crashes. `marsa schedule` does the same for `schedule:work`. |
 | `marsa services [start\|stop\|restart <id>]` | List the services (Caddy, PHP, and your database servers), or control one. |
 | `marsa logs <id> [-f]` | Show the output of a service, such as `caddy`. |
 | `marsa daemon <start\|stop\|status>` | Control `marsad`, the program that runs in the background. |

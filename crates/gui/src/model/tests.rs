@@ -659,12 +659,263 @@ fn a_log_source_is_a_service_and_caddy_is_never_written_twice() {
         LogSource::Service("php-fpm-8.4".parse::<ServiceId>().unwrap())
     );
     assert_eq!(
-        (LogSource::Caddy.id(), pool.id()),
+        (LogSource::Caddy.service(), pool.service()),
         (
-            ServiceId::Caddy,
-            "php-fpm-8.4".parse::<ServiceId>().unwrap()
+            Some(ServiceId::Caddy),
+            Some("php-fpm-8.4".parse::<ServiceId>().unwrap())
         )
     );
+    // A site's own log is no service's.
+    assert_eq!(LogSource::Site("shop".into()).service(), None);
+}
+
+/// The Logs screen on the log of the site `name`.
+fn site_log(name: &str) -> Route {
+    Route::Logs(LogSource::Site(name.into()))
+}
+
+/// A connected model with these Laravel sites.
+fn with_sites(names: &[&str]) -> Model {
+    let mut model = connected();
+    model.update(Update::Sites(site_list(names)));
+    model
+}
+
+/// The lines of a site's log, from seq `first`.
+fn site_lines(first: u64, texts: &[&str]) -> Vec<SiteLogLine> {
+    texts
+        .iter()
+        .zip(first..)
+        .map(|(text, seq)| SiteLogLine {
+            seq,
+            text: (*text).into(),
+        })
+        .collect()
+}
+
+fn follows(effect: &Effect, site: &str) -> bool {
+    matches!(effect, Effect::Send(Command::FollowSiteLog(name)) if name == site)
+}
+
+fn stops(effect: &Effect) -> bool {
+    matches!(effect, Effect::Send(Command::StopSiteLog))
+}
+
+#[test]
+fn choosing_a_sites_log_follows_it_once_and_another_source_or_screen_stops_it() {
+    let mut model = with_sites(&["blog", "shop"]);
+    let effect = model.apply_action(Action::Navigate(site_log("shop")));
+    assert!(follows(&effect, "shop"), "{effect:?}");
+    // Once: the frames after it ask for nothing.
+    assert!(model.next_command().is_none());
+    // Another site: its log in place of the first (one reader at a time).
+    let effect = model.apply_action(Action::Navigate(site_log("blog")));
+    assert!(follows(&effect, "blog"), "{effect:?}");
+    // Another source: the reader stops, once.
+    let effect = model.apply_action(Action::Navigate(Route::Logs(LogSource::Caddy)));
+    assert!(stops(&effect), "{effect:?}");
+    assert!(model.next_command().is_none());
+    // Another screen stops it too.
+    model.apply_action(Action::Navigate(site_log("shop")));
+    let effect = model.apply_action(Action::Navigate(Route::Sites));
+    assert!(stops(&effect), "{effect:?}");
+    // A screen that sends a read as it opens: the stop goes with the next
+    // command the window asks for.
+    model.apply_action(Action::Navigate(site_log("shop")));
+    let effect = model.apply_action(Action::Navigate(Route::Mail));
+    assert!(
+        matches!(effect, Effect::Send(Command::ReadMail)),
+        "{effect:?}"
+    );
+    assert!(matches!(model.next_command(), Some(Command::StopSiteLog)));
+    assert!(model.next_command().is_none());
+}
+
+#[test]
+fn only_a_laravel_site_is_followed_and_only_while_connected() {
+    let mut list = site_list(&["shop"]);
+    list.sites.push(Site {
+        kind: marsa_core::types::SiteKind::Static,
+        ..site("docs", true)
+    });
+    let mut offline = Model::default();
+    offline.update(Update::Sites(list.clone()));
+    assert!(
+        offline
+            .apply_action(Action::Navigate(site_log("shop")))
+            .is_none()
+    );
+    // Connected, the list read: it follows now, with no click.
+    offline.update(Update::Connected(health()));
+    assert!(offline.next_command().is_none(), "no list yet");
+    offline.update(Update::Sites(list));
+    assert!(matches!(offline.next_command(), Some(Command::FollowSiteLog(name)) if name == "shop"));
+    assert!(offline.is_laravel_site("shop"));
+    assert!(!offline.is_laravel_site("docs") && !offline.is_laravel_site("nope"));
+}
+
+#[test]
+fn a_sites_log_keeps_the_newest_5000_lines_and_drops_the_lines_of_another_reader() {
+    let mut model = with_sites(&["blog", "shop"]);
+    model.apply_action(Action::Navigate(site_log("shop")));
+    let texts: Vec<String> = (0..6000)
+        .map(|n| format!("[2026-11-24 10:15:03] local.INFO: line {n}"))
+        .collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    model.update(Update::SiteLog {
+        site: "shop".into(),
+        lines: site_lines(0, &refs),
+    });
+    let source = LogSource::Site("shop".into());
+    let rows = model.source_rows(&source);
+    assert_eq!(rows.len(), MAX_LOG_LINES);
+    assert_eq!(rows[0].text, texts[1000]);
+    // The columns are the message's, without the stamp and the level.
+    assert_eq!(rows[0].columns, "line 1000".len());
+    // A line it has, and a line of a reader stopped since, are dropped.
+    model.update(Update::SiteLog {
+        site: "shop".into(),
+        lines: site_lines(5999, &["again"]),
+    });
+    model.update(Update::SiteLog {
+        site: "blog".into(),
+        lines: site_lines(0, &["not shown"]),
+    });
+    assert_eq!(model.source_rows(&source).len(), MAX_LOG_LINES);
+    assert!(
+        model
+            .source_rows(&LogSource::Site("blog".into()))
+            .is_empty()
+    );
+    // Leaving the screen drops the lines; coming back reads them again.
+    model.apply_action(Action::Navigate(Route::Logs(LogSource::Caddy)));
+    assert!(model.source_rows(&source).is_empty());
+}
+
+#[test]
+fn a_stack_trace_takes_the_level_of_its_entry_and_only_a_sites_log_reads_laravel() {
+    let mut model = with_sites(&["shop"]);
+    model.apply_action(Action::Navigate(site_log("shop")));
+    let lines = [
+        "#9 /app/Old.php(1): old()",
+        "[2026-11-24 10:15:03] local.ERROR: boom",
+        "[stacktrace]",
+        "#0 /app/Foo.php(12): bar()",
+        "[2026-11-24 10:15:04] local.INFO: ok",
+    ];
+    model.update(Update::SiteLog {
+        site: "shop".into(),
+        lines: site_lines(0, &lines),
+    });
+    let rows: Vec<(LogLevel, bool)> = model
+        .source_rows(&LogSource::Site("shop".into()))
+        .iter()
+        .map(|row| (row.level, row.continuation))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (LogLevel::Info, false),
+            (LogLevel::Error, false),
+            (LogLevel::Error, true),
+            (LogLevel::Error, true),
+            (LogLevel::Info, false),
+        ]
+    );
+    // The same lines in Caddy's log are a program's lines: no level read.
+    let caddy = lines
+        .iter()
+        .zip(0..)
+        .map(|(text, seq)| LogLine {
+            text: (*text).into(),
+            ..log_line(ServiceId::Caddy, seq)
+        })
+        .collect();
+    model.update(Update::Log(caddy));
+    assert!(
+        model
+            .log_rows(ServiceId::Caddy)
+            .iter()
+            .all(|row| row.level == LogLevel::Info && !row.continuation)
+    );
+}
+
+#[test]
+fn a_refused_log_says_why_and_is_not_asked_again_until_the_screen_opens_again() {
+    let mut model = with_sites(&["shop"]);
+    model.apply_action(Action::Navigate(site_log("shop")));
+    model.update(Update::SiteLogFailed {
+        site: "shop".into(),
+        code: "site_log_unsafe".into(),
+    });
+    assert_eq!(model.site_log_error("shop"), Some("site_log_unsafe"));
+    assert_eq!(model.site_log_error("blog"), None);
+    // No retry with each frame.
+    assert!(model.next_command().is_none());
+    // A failure of a reader stopped since says nothing.
+    model.update(Update::SiteLogFailed {
+        site: "blog".into(),
+        code: "site_not_found".into(),
+    });
+    assert_eq!(model.site_log_error("blog"), None);
+    // Opening the screen again tries again.
+    model.apply_action(Action::Navigate(Route::Home));
+    let effect = model.apply_action(Action::Navigate(site_log("shop")));
+    assert!(follows(&effect, "shop"), "{effect:?}");
+    assert_eq!(model.site_log_error("shop"), None);
+}
+
+#[test]
+fn a_lost_daemon_keeps_the_lines_and_a_new_session_follows_again() {
+    let mut model = with_sites(&["shop"]);
+    model.apply_action(Action::Navigate(site_log("shop")));
+    model.update(Update::SiteLog {
+        site: "shop".into(),
+        lines: site_lines(0, &["[2026-11-24 10:15:03] local.INFO: hi"]),
+    });
+    let source = LogSource::Site("shop".into());
+    model.update(Update::Reconnecting);
+    // The lines stay, as a program's do, and nothing is sent.
+    assert_eq!(model.source_rows(&source).len(), 1);
+    assert!(model.next_command().is_none());
+    // A new session follows again, once its site list is read.
+    model.update(Update::Connected(health()));
+    assert!(model.next_command().is_none());
+    model.update(Update::Sites(site_list(&["shop"])));
+    assert!(matches!(model.next_command(), Some(Command::FollowSiteLog(name)) if name == "shop"));
+    assert!(model.next_command().is_none());
+}
+
+#[test]
+fn a_site_that_goes_away_sends_logs_to_caddy_and_stops_the_reader() {
+    let mut model = with_sites(&["blog", "shop"]);
+    model.apply_action(Action::Navigate(site_log("shop")));
+    // Another site goes: nothing changes.
+    apply(&mut model, Event::SitesChanged(site_list(&["shop"])));
+    assert_eq!(model.route, site_log("shop"));
+    assert!(model.next_command().is_none());
+    // Its own site goes: Caddy's log, and the reader stops.
+    apply(&mut model, Event::SitesChanged(site_list(&["blog"])));
+    assert_eq!(model.route, Route::Logs(LogSource::Caddy));
+    assert!(matches!(model.next_command(), Some(Command::StopSiteLog)));
+    // A site that is no longer Laravel goes the same way.
+    model.apply_action(Action::Navigate(site_log("blog")));
+    let mut list = site_list(&[]);
+    list.sites.push(Site {
+        kind: marsa_core::types::SiteKind::Php,
+        ..site("blog", true)
+    });
+    model.update(Update::Sites(list));
+    assert_eq!(model.route, Route::Logs(LogSource::Caddy));
+    assert!(matches!(model.next_command(), Some(Command::StopSiteLog)));
+    // The log of a site not in the list is Caddy's, and never asked for.
+    let effect = model.apply_action(Action::Navigate(site_log("gone")));
+    assert!(effect.is_none(), "{effect:?}");
+    assert_eq!(model.route, Route::Logs(LogSource::Caddy));
+    // With no daemon the list is empty, so the source stays as chosen.
+    let mut offline = Model::default();
+    offline.apply_action(Action::Navigate(site_log("shop")));
+    assert_eq!(offline.route, site_log("shop"));
 }
 
 #[test]

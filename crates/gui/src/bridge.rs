@@ -8,6 +8,7 @@
 mod db_browser;
 mod dumps;
 mod mail;
+mod site_log;
 
 pub use db_browser::{DbCommand, DbUpdate};
 
@@ -20,7 +21,7 @@ use eframe::egui;
 use marsa_core::client::{self, ClientError, DaemonClient, StreamItem};
 use marsa_core::types::{
     Event, HostsStatus, InstallProgress, InstallUpdate, ServiceAction, ServiceId, ServiceStatus,
-    SiteList, SitePatch,
+    SiteKey, SiteList, SitePatch, WorkerKind,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -47,6 +48,12 @@ pub enum Command {
     Link { name: String, folder: PathBuf },
     /// A site's HTTPS switch.
     Secure { site: String, secure: bool },
+    /// A worker's switch on a Laravel site's page.
+    SetWorker {
+        kind: WorkerKind,
+        site: SiteKey,
+        on: bool,
+    },
     /// A default version or a site's PHP version, picked in a list.
     Save(Change),
     /// An Install button, or the first-run panel.
@@ -77,6 +84,11 @@ pub enum Command {
     SetDumpsCapture(bool),
     /// A read of the Databases screen, or its close.
     Db(DbCommand),
+    /// Logs shows the log of this Laravel site: follow it, in place of the
+    /// one followed before.
+    FollowSiteLog(String),
+    /// Logs no longer shows a site's log: stop following it.
+    StopSiteLog,
 }
 
 /// The window's end of the bridge.
@@ -262,6 +274,7 @@ async fn session(
     // Stops with this session when it is dropped.
     let mail = mail::Mail::start(&client, window);
     let dumps = dumps::Dumps::start(&client, window);
+    let mut site_log = site_log::SiteLog::default();
     if !window.send(Update::Connected(health)) || !refresh(&client, window, &mail).await {
         return End::Closed;
     }
@@ -330,6 +343,8 @@ async fn session(
                 Some(Command::ReadDumps) => dumps.send(dumps::Job::Read),
                 Some(Command::ClearDumps) => dumps.send(dumps::Job::Clear),
                 Some(Command::SetDumpsCapture(on)) => dumps.send(dumps::Job::Capture(on)),
+                Some(Command::FollowSiteLog(site)) => site_log.follow(&client, window, site),
+                Some(Command::StopSiteLog) => site_log.stop(),
                 Some(command) => run_command(&client, command, window.clone(), reread.clone()),
                 None => return End::Closed,
             },
@@ -529,6 +544,20 @@ fn run_command(
                     .err()
                     .map(|err| sites_failed(&format!("cannot change HTTPS for {site}"), &err))
             }
+            Command::SetWorker { kind, site, on } => {
+                match client.set_worker(site.as_str(), kind, on).await {
+                    Ok(_) => {
+                        tracing::info!(site = %site, worker = kind.prefix(), on, "worker setting changed");
+                        None
+                    }
+                    Err(err) => {
+                        let (worker, code) = (kind.prefix(), err.code());
+                        tracing::warn!(code, error = %err, site = %site, worker, "cannot change the worker");
+                        let code = code.to_owned();
+                        Some(Update::WorkerNotSaved { kind, site, code })
+                    }
+                }
+            }
             Command::Save(change) => Some(save(&client, change).await),
             Command::Install(job) => Some(install(&client, job).await),
             Command::Setup => Some(match client.run_setup().await {
@@ -587,6 +616,8 @@ fn run_command(
             Command::ReadMail | Command::ReadMailText(_) | Command::ClearMail => None,
             // The session's dumps reader runs these, one at a time.
             Command::ReadDumps | Command::ClearDumps | Command::SetDumpsCapture(_) => None,
+            // The session's site log reader runs these.
+            Command::FollowSiteLog(_) | Command::StopSiteLog => None,
             Command::SetXdebug(enabled) => Some(match client.set_xdebug(enabled).await {
                 Ok(state) => {
                     tracing::info!(enabled, "Xdebug changed");

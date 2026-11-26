@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::Site;
+use super::{Site, WorkerKind};
 
 /// `GET /v1/sites`, and the answer to every change of the sites.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +85,19 @@ pub struct SitePatch {
     /// Run `php artisan schedule:work` for the site, or stop it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<bool>,
+}
+
+impl SitePatch {
+    /// Turns worker `kind` of the site on or off, and keeps every other
+    /// setting: `{"queue": true}`.
+    pub fn worker(kind: WorkerKind, on: bool) -> Self {
+        let mut patch = Self::default();
+        match kind {
+            WorkerKind::Queue => patch.queue = Some(on),
+            WorkerKind::Schedule => patch.schedule = Some(on),
+        }
+        patch
+    }
 }
 
 /// For a field where `null` and a missing key differ. A missing key stays

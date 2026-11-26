@@ -3,6 +3,7 @@
 //! so they live apart from the model that handles them.
 
 use super::*;
+use marsa_core::types::{SiteKey, WorkerKind};
 
 /// What the bridge sends to the window.
 #[derive(Debug)]
@@ -22,6 +23,18 @@ pub enum Update {
     /// Recent lines of the services' logs (each line names its service),
     /// oldest first.
     Log(Vec<LogLine>),
+    /// Lines of the log of the Laravel site `site` that the bridge follows,
+    /// oldest first.
+    SiteLog {
+        site: String,
+        lines: Vec<SiteLogLine>,
+    },
+    /// The log of `site` cannot be followed, or its stream ended: a client
+    /// error code, such as `site_log_unsafe`.
+    SiteLogFailed {
+        site: String,
+        code: String,
+    },
     /// A call failed but the connection is fine. A client error code.
     Notice(String),
     /// The whole site list, read when a session starts and again after the
@@ -38,6 +51,13 @@ pub enum Update {
     },
     /// A sites call failed but the connection is fine. A client error code.
     SitesFailed(String),
+    /// The daemon refused the change of a worker's switch, or could not be
+    /// reached. A client error code, such as `site_not_laravel`.
+    WorkerNotSaved {
+        kind: WorkerKind,
+        site: SiteKey,
+        code: String,
+    },
     /// Every runtime with its installed versions and default, read when a
     /// session starts and after an install.
     Runtimes(RuntimeList),
@@ -180,6 +200,12 @@ pub enum Action {
     SitePhp { site: String, choice: Choice },
     /// The site's menu: serve it over HTTPS (`true`) or plain HTTP.
     SetSecure { site: String, secure: bool },
+    /// A worker's switch on a Laravel site's page: run it (`true`) or not.
+    SetWorker {
+        kind: WorkerKind,
+        site: SiteKey,
+        on: bool,
+    },
     /// "Unlink…" of a site: the confirmation opens.
     AskUnlink(String),
     /// "Forget…" of a parked folder: the confirmation opens.

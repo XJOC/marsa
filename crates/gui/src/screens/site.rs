@@ -1,7 +1,8 @@
 //! A site's own page (layout.md, Screens: Site page): the name and its
-//! address with "Open folder" and "Open in browser", the site's PHP on the
-//! large version buttons with the reason, the facts (the HTTPS switch, the
-//! folder, the kind), and "Unlink this site…" at the end.
+//! address with "Open folder" and "Open in browser" (and "Open log" for a
+//! Laravel site), the site's PHP on the large version buttons with the
+//! reason, the workers of a Laravel site (`workers`), the facts (the HTTPS
+//! switch, the folder, the kind), and "Unlink this site…" at the end.
 //!
 //! It is two functions, like Home and Sites. [`view`] reads the [`Model`]
 //! and decides what the page says: pure, so the tests assert it without a
@@ -12,18 +13,19 @@
 //! There is no tab bar yet: with one part (the overview) a bar would look like
 //! navigation that goes nowhere. It comes back with the second part, drawn by
 //! [`crate::widgets::Tabs`], when Mail, Dumps, Database, or Logs ship
-//! (rules.md 8). The window has one Caddy log, not a log per site, so there is
-//! no Logs part yet.
+//! (rules.md 8). Until then a Laravel site's own log is a button, "Open log",
+//! that opens Logs on it.
 
 use std::path::Path;
 
 use eframe::egui::{CursorIcon, Sense, Ui, vec2};
 use marsa_core::runtimes::Runtime;
-use marsa_core::types::Site;
+use marsa_core::types::{Site, SiteKind};
 
+use self::workers::WorkersView;
 use super::lines;
 use super::sites::{self, Reason};
-use crate::model::{Action, Choice, Model, Route};
+use crate::model::{Action, Choice, LogSource, Model, Route};
 use crate::screens::home::{PhpChoice, php_choices};
 use crate::strings;
 use crate::theme::page::SITE_FACT_LABEL;
@@ -31,6 +33,8 @@ use crate::theme::{Direction, Theme};
 use crate::widgets::{
     Button, Icon, QuietTone, Switch, Text, VersionPick, VersionPicker, fact_card,
 };
+
+mod workers;
 
 /// What the page says.
 #[derive(Debug, PartialEq)]
@@ -55,9 +59,13 @@ pub(crate) struct Found<'a> {
     pub name: &'a str,
     /// What the browser opens: `https://shop.test`.
     pub url: String,
+    /// A Laravel project: it writes a log of its own, which "Open log" shows.
+    pub laravel: bool,
     /// "Unlinking shop.test…", while the daemon removes it.
     pub removing: Option<String>,
     pub php: PhpView<'a>,
+    /// The Workers card: a Laravel site's only.
+    pub workers: Option<WorkersView>,
     pub facts: Facts<'a>,
     pub unlink: Unlink<'a>,
     /// Why "Forget…" of the parked folder cannot be pressed now.
@@ -131,8 +139,10 @@ pub(crate) fn view<'a>(model: &'a Model, name: &'a str) -> SiteView<'a> {
     SiteView::Found(Box::new(Found {
         name: &site.name,
         url: crate::model::url(site),
+        laravel: site.kind == SiteKind::Laravel,
         removing: sites::removing_line(model),
         php: php(model, site),
+        workers: workers::view(model, site),
         facts: facts(model, site),
         unlink: unlink_of(model, site),
         forget_off: (model.is_connected() && !model.can_remove())
@@ -207,11 +217,15 @@ fn found(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action>
         lines::mute(ui, theme, text);
     }
     php_section(ui, theme, page, actions);
+    if let Some(view) = &page.workers {
+        workers::show(ui, theme, view, actions);
+    }
     facts_card(ui, theme, page, actions);
     unlink(ui, theme, page, actions);
 }
 
-/// The name and the address, and the two ways to open the site at the end.
+/// The name and the address, and at the end the ways to open the site, and
+/// its log for a Laravel site.
 fn header(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = theme.space.s3;
@@ -234,6 +248,10 @@ fn header(ui: &mut Ui, theme: &Theme, page: &Found<'_>, actions: &mut Vec<Action
                 // From the end: the primary button, then the one before it.
                 if ui.add(Button::primary(strings::OPEN_IN_BROWSER)).clicked() {
                     actions.push(Action::OpenSite(page.name.to_owned()));
+                }
+                if page.laravel && ui.add(Button::secondary(strings::OPEN_LOG)).clicked() {
+                    let log = LogSource::Site(page.name.to_owned());
+                    actions.push(Action::Navigate(Route::Logs(log)));
                 }
                 if ui.add(Button::secondary(strings::OPEN_FOLDER)).clicked() {
                     actions.push(Action::OpenFolder(page.name.to_owned()));
@@ -678,6 +696,37 @@ mod tests {
         ] {
             assert!(model.apply_action(action).command().is_none());
         }
+    }
+
+    #[test]
+    fn open_log_opens_logs_on_a_laravel_sites_own_log_and_is_absent_for_others() {
+        let model = model();
+        assert!(found(&view(&model, "shop")).laravel);
+        let log = Route::Logs(LogSource::Site("shop".into()));
+        assert_eq!(
+            click(&model, strings::OPEN_LOG),
+            [Action::Navigate(log.clone())]
+        );
+        // The model follows that log once the screen shows it.
+        let mut model = model;
+        let effect = model.apply_action(Action::Navigate(log));
+        assert!(matches!(effect.command(), Some(Command::FollowSiteLog(name)) if name == "shop"));
+        // A site that is not Laravel writes no log of its own: no button.
+        let plain = Site {
+            kind: SiteKind::Php,
+            ..site("shop", Some("8.4.27"), Some(Source::GlobalDefault))
+        };
+        with_sites(&mut model, vec![plain]);
+        assert!(!found(&view(&model, "shop")).laravel);
+        let (_, tree) = start(&model, "shop");
+        assert!(tree.node_with_label(strings::OPEN_LOG).is_none());
+        assert!(tree.node_with_label(strings::OPEN_FOLDER).is_some());
+        // Nor any workers.
+        assert!(found(&view(&model, "shop")).workers.is_none());
+        assert!(tree.node_with_text(strings::WORKERS).is_none());
+        let (_, tree) = start(&self::model(), "shop");
+        assert!(tree.node_with_text(strings::WORKERS).is_some());
+        assert!(tree.node_with_label(strings::WORKER_QUEUE).is_some());
     }
 
     #[test]
