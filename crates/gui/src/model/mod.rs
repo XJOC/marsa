@@ -34,7 +34,7 @@ mod workers;
 
 pub use db_browser::{
     DbAction, DbBrowserState, DbScreen, DbTab, DbView, KEY_LIST_LIMIT, KeyBrowser, KeyList,
-    KeysAction, OpenKey, OpenTable, PaneValue, QueryRun, QueryState, ReadError,
+    KeyShape, KeyValue, KeysAction, OpenKey, OpenTable, PaneValue, QueryRun, QueryState, ReadError,
 };
 pub use dumps::DumpsState;
 use installs::Install;

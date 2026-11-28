@@ -6,12 +6,11 @@
 //! once for each page (the model's `serial` tells a new page) and kept in
 //! egui's memory, not on each frame.
 
-use eframe::egui::{
-    Align, CornerRadius, Label, Layout, RichText, ScrollArea, Sense, Ui, Vec2, vec2,
-};
+use eframe::egui::{Align, CornerRadius, Layout, Sense, Ui, Vec2, vec2};
 use marsa_core::types::{DbCell, DbPage};
 
 use super::super::lines::message;
+use super::pane::{self, Pane, PaneAction};
 use crate::model::{Action, DbAction, OpenTable};
 use crate::strings;
 use crate::theme::page::DB_VALUE_HEIGHT;
@@ -19,7 +18,6 @@ use crate::theme::{Direction, Theme};
 use crate::widgets::grid::{Grid, GridEvent, column_widths};
 use crate::widgets::icons::{Glyph, Icon};
 use crate::widgets::table::card;
-use crate::widgets::tag::Tag;
 use crate::widgets::{Button, Text};
 
 pub(super) fn show(ui: &mut Ui, theme: &Theme, open: &OpenTable, actions: &mut Vec<Action>) {
@@ -169,8 +167,8 @@ fn page_bar(ui: &mut Ui, theme: &Theme, open: &OpenTable, actions: &mut Vec<Acti
     });
 }
 
-/// The current cell's whole value: its column, kind and size, Copy and
-/// close, then the value in mono, wrapped and selectable.
+/// The current cell's whole value: its column, kind and size, then what is
+/// still read or cut.
 fn value_pane(ui: &mut Ui, theme: &Theme, open: &OpenTable, actions: &mut Vec<Action>) {
     let Some(page) = &open.page else {
         return;
@@ -179,94 +177,47 @@ fn value_pane(ui: &mut Ui, theme: &Theme, open: &OpenTable, actions: &mut Vec<Ac
         return;
     };
     let shown = page.columns.get(open.current.1);
-    let size = vec2(ui.available_width(), DB_VALUE_HEIGHT);
-    ui.allocate_ui_with_layout(size, column(), |ui| {
-        card(ui, |ui| {
-            ui.set_min_height(DB_VALUE_HEIGHT);
-            ui.spacing_mut().item_spacing = Vec2::ZERO;
-            let line = vec2(ui.available_width(), theme.size.tag + theme.space.s3);
-            ui.allocate_ui_with_layout(line, Direction::CURRENT.row(), |ui| {
-                ui.spacing_mut().item_spacing.x = theme.space.s3;
-                ui.add_space(theme.space.s3);
-                let name = shown.map_or("", |column| column.name.as_str());
-                ui.add(Text::new(name, theme.text.body_strong, theme.color.ink));
-                let bytes = match cell {
-                    DbCell::Text(text) => Some(text.len() as u64),
-                    DbCell::Cut { bytes, .. } | DbCell::Binary { bytes } => Some(*bytes),
-                    DbCell::Null => None,
-                };
-                if let (Some(column), Some(bytes)) = (shown, bytes) {
-                    let caption = strings::value_caption(column.kind, bytes);
-                    ui.add(Text::new(&caption, theme.text.caption, theme.color.mute));
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_space(theme.space.s2);
-                    let close = Button::icon(Icon::Cross, strings::DB_CLOSE_VALUE);
-                    if ui.add(close).clicked() {
-                        actions.push(Action::Db(DbAction::ClosePane));
-                    }
-                    let copy = Button::secondary(strings::DB_COPY)
-                        .in_row()
-                        .disabled_if(matches!(cell, DbCell::Binary { .. }), strings::DB_NO_COPY);
-                    if ui.add(copy).clicked() {
-                        actions.push(Action::Db(DbAction::Copy));
-                    }
-                });
-            });
-            let rest = vec2(ui.available_width(), ui.available_height());
-            ui.allocate_ui_with_layout(rest, column(), |ui| {
-                ui.add_space(theme.space.s2);
-                ScrollArea::vertical()
-                    .id_salt("db_value")
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add_space(theme.space.s3);
-                            value(ui, theme, open, cell);
-                        });
-                    });
-            });
-        });
-    });
+    let bytes = match cell {
+        DbCell::Text(text) => Some(text.len() as u64),
+        DbCell::Cut { bytes, .. } | DbCell::Binary { bytes } => Some(*bytes),
+        DbCell::Null => None,
+    };
+    let pane = Pane {
+        title: shown.map_or("", |column| column.name.as_str()),
+        caption: shown
+            .zip(bytes)
+            .map(|(column, bytes)| strings::value_caption(column.kind, bytes)),
+        cell,
+        height: DB_VALUE_HEIGHT,
+        closes: true,
+    };
+    match pane::show(ui, theme, pane, |ui| value_notes(ui, theme, open)) {
+        Some(PaneAction::Copy) => actions.push(Action::Db(DbAction::Copy)),
+        Some(PaneAction::Close) => actions.push(Action::Db(DbAction::ClosePane)),
+        None => {}
+    }
 }
 
-fn value(ui: &mut Ui, theme: &Theme, open: &OpenTable, cell: &DbCell) {
-    ui.vertical(|ui| {
-        match cell {
-            DbCell::Null => {
-                ui.add(Tag::new(strings::NULL_TAG, theme));
-            }
-            DbCell::Binary { bytes } => {
-                let text = strings::binary_value(*bytes);
-                ui.add(Text::new(&text, theme.text.body_sm, theme.color.mute));
-            }
-            DbCell::Text(text) | DbCell::Cut { text, .. } => {
-                // egui keeps the laid-out text while it does not change.
-                let text = RichText::new(text)
-                    .font(theme.text.mono_sm.font_id())
-                    .color(theme.color.ink);
-                ui.add(Label::new(text).wrap().selectable(true));
-            }
-        }
-        let read = open
-            .value
-            .as_ref()
-            .filter(|v| (Some(v.row), v.column) == open.current);
-        if open.reading_value() {
-            ui.add(Text::new(
-                strings::DB_READING_VALUE,
-                theme.text.caption,
-                theme.color.mute,
-            ));
-        } else if let Some(code) = read.and_then(|value| value.error.as_deref()) {
-            let text = strings::error_text(code);
-            ui.add(Text::new(&text, theme.text.caption, theme.color.mute));
-        }
-        // Only the read value is cut at 64 KB; a page's cell is cut shorter.
-        let whole = read.and_then(|value| value.cell.as_ref());
-        if let Some(DbCell::Cut { bytes, .. }) = whole {
-            let cut = strings::value_cut(*bytes);
-            ui.add(Text::new(&cut, theme.text.caption, theme.color.mute));
-        }
-    });
+/// Under the value: the whole value still read, why it was not, or its cut.
+fn value_notes(ui: &mut Ui, theme: &Theme, open: &OpenTable) {
+    let read = open
+        .value
+        .as_ref()
+        .filter(|v| (Some(v.row), v.column) == open.current);
+    if open.reading_value() {
+        ui.add(Text::new(
+            strings::DB_READING_VALUE,
+            theme.text.caption,
+            theme.color.mute,
+        ));
+    } else if let Some(code) = read.and_then(|value| value.error.as_deref()) {
+        let text = strings::error_text(code);
+        ui.add(Text::new(&text, theme.text.caption, theme.color.mute));
+    }
+    // Only the read value is cut at 64 KB; a page's cell is cut shorter.
+    let whole = read.and_then(|value| value.cell.as_ref());
+    if let Some(DbCell::Cut { bytes, .. }) = whole {
+        let cut = strings::value_cut(*bytes);
+        ui.add(Text::new(&cut, theme.text.caption, theme.color.mute));
+    }
 }

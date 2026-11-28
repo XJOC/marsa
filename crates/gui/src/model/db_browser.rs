@@ -15,7 +15,9 @@ use crate::bridge::{DbCommand, DbUpdate};
 mod keys;
 mod query;
 mod table;
-pub use keys::{KEY_LIST_LIMIT, KeyBrowser, KeyList, KeysAction, OpenKey, ReadError};
+pub use keys::{
+    KEY_LIST_LIMIT, KeyBrowser, KeyList, KeyShape, KeyValue, KeysAction, OpenKey, ReadError,
+};
 pub use query::{QueryRun, QueryState};
 pub use table::{DbAction, DbTab, OpenTable, PaneValue};
 

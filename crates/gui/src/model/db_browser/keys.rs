@@ -3,9 +3,6 @@
 //! the chosen key's value. Leaving the screen drops what was read; the
 //! database, the search, the type, and the open key's name stay.
 
-use std::borrow::Cow;
-use std::collections::HashSet;
-
 use marsa_core::db_browser::key_pattern;
 use marsa_core::types::{
     DbCell, DbKeyDetail, DbKeyKind, DbKeyRequest, DbKeyValue, DbKeys, DbKeysRequest, DbValkeyInfo,
@@ -69,7 +66,7 @@ pub struct KeyBrowser {
     sent: (Option<String>, Option<DbKeyKind>),
 }
 
-/// The keys read so far.
+/// The keys read so far, sorted by name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyList {
     pub names: Vec<String>,
@@ -92,16 +89,12 @@ impl KeyList {
         self.cursor != 0 && self.names.len() >= KEY_LIST_LIMIT
     }
 
-    /// A page after this one. `SCAN` may give a key twice while the database
-    /// grows: it is listed once.
+    /// A page added to the list, which stays in the names' order: Valkey
+    /// gives keys in none, and may give one twice while the database grows.
     fn append(&mut self, page: DbKeys) {
-        let seen: HashSet<&str> = self.names.iter().map(String::as_str).collect();
-        let new: Vec<String> = page
-            .keys
-            .into_iter()
-            .filter(|name| !seen.contains(name.as_str()))
-            .collect();
-        self.names.extend(new);
+        self.names.extend(page.keys);
+        self.names.sort_unstable();
+        self.names.dedup();
         self.names.truncate(KEY_LIST_LIMIT);
         self.cursor = page.cursor;
         self.unshown += page.unshown;
@@ -114,7 +107,7 @@ impl KeyList {
 pub struct OpenKey {
     pub name: String,
     /// What was read. While it is read again, the old one stays.
-    pub detail: Option<DbKeyDetail>,
+    pub value: Option<KeyValue>,
     /// Grows with each value that arrives: the screen measures the grid once
     /// for each.
     pub serial: u64,
@@ -125,6 +118,83 @@ pub struct OpenKey {
     pub error: Option<ReadError>,
 }
 
+/// A key's value as the grid draws it, made once when it arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyValue {
+    /// The seconds it had left when read.
+    pub ttl: Option<u64>,
+    pub shape: KeyShape,
+    /// A string is one cell. A hash's rows are a field and its value; a
+    /// list's an index and its item; a set's a member; a sorted set's a
+    /// member and its score.
+    pub rows: Vec<Vec<DbCell>>,
+    /// The bytes of a string, or the elements of a collection, of which
+    /// `rows` may hold only the first.
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyShape {
+    String,
+    Hash,
+    List,
+    Set,
+    Zset,
+    /// A type the browser does not read, by Valkey's word.
+    Other(String),
+}
+
+impl From<DbKeyDetail> for KeyValue {
+    fn from(detail: DbKeyDetail) -> Self {
+        let (shape, rows, total) = match detail.value {
+            DbKeyValue::String { value } => {
+                let bytes = match &value {
+                    DbCell::Null => 0,
+                    DbCell::Text(text) => text.len() as u64,
+                    DbCell::Cut { bytes, .. } | DbCell::Binary { bytes } => *bytes,
+                };
+                (KeyShape::String, vec![vec![value]], bytes)
+            }
+            DbKeyValue::Hash { fields, total } => {
+                let rows = fields.into_iter().map(|(f, v)| vec![f, v]);
+                (KeyShape::Hash, rows.collect(), total)
+            }
+            DbKeyValue::List { items, total } => {
+                let rows = items.into_iter().enumerate();
+                let rows = rows.map(|(at, item)| vec![DbCell::Text(at.to_string()), item]);
+                (KeyShape::List, rows.collect(), total)
+            }
+            DbKeyValue::Set { members, total } => {
+                let rows = members.into_iter().map(|member| vec![member]);
+                (KeyShape::Set, rows.collect(), total)
+            }
+            DbKeyValue::Zset { members, total } => {
+                let rows = members.into_iter();
+                let rows = rows.map(|(member, score)| vec![member, DbCell::Text(score)]);
+                (KeyShape::Zset, rows.collect(), total)
+            }
+            DbKeyValue::Other { name } => (KeyShape::Other(name), Vec::new(), 0),
+        };
+        Self {
+            ttl: detail.ttl,
+            shape,
+            rows,
+            total,
+        }
+    }
+}
+
+impl KeyValue {
+    /// The column whose cell is the value: where a new value's current cell
+    /// starts.
+    fn value_column(&self) -> usize {
+        match self.shape {
+            KeyShape::Hash | KeyShape::List => 1,
+            _ => 0,
+        }
+    }
+}
+
 impl OpenKey {
     fn named(name: String) -> Self {
         Self {
@@ -133,61 +203,15 @@ impl OpenKey {
         }
     }
 
-    /// The rows of the value's grid; one for a string.
-    pub fn rows(&self) -> usize {
-        match self.detail.as_ref().map(|detail| &detail.value) {
-            Some(DbKeyValue::String { .. }) => 1,
-            Some(DbKeyValue::Hash { fields, .. }) => fields.len(),
-            Some(DbKeyValue::List { items, .. }) => items.len(),
-            Some(DbKeyValue::Set { members, .. }) => members.len(),
-            Some(DbKeyValue::Zset { members, .. }) => members.len(),
-            Some(DbKeyValue::Other { .. }) | None => 0,
-        }
-    }
-
-    /// The cell at `row` and `column` of the value's grid: a hash's field and
-    /// value, a list's index and item, a set's member, a sorted set's member
-    /// and score. A string is the one cell.
-    pub fn cell(&self, row: usize, column: usize) -> Option<Cow<'_, DbCell>> {
-        let text = |text: String| Some(Cow::Owned(DbCell::Text(text)));
-        match &self.detail.as_ref()?.value {
-            DbKeyValue::String { value } => (row == 0).then_some(Cow::Borrowed(value)),
-            DbKeyValue::Hash { fields, .. } => {
-                let (field, value) = fields.get(row)?;
-                [field, value].get(column).map(|cell| Cow::Borrowed(*cell))
-            }
-            DbKeyValue::List { items, .. } => {
-                let item = items.get(row)?;
-                match column {
-                    0 => text(row.to_string()),
-                    _ => Some(Cow::Borrowed(item)),
-                }
-            }
-            DbKeyValue::Set { members, .. } => members.get(row).map(Cow::Borrowed),
-            DbKeyValue::Zset { members, .. } => {
-                let (member, score) = members.get(row)?;
-                match column {
-                    0 => Some(Cow::Borrowed(member)),
-                    _ => text(score.clone()),
-                }
-            }
-            DbKeyValue::Other { .. } => None,
-        }
-    }
-
-    /// The column whose cell is the value: where a new value's current cell
-    /// starts.
-    fn value_column(&self) -> usize {
-        match self.detail.as_ref().map(|detail| &detail.value) {
-            Some(DbKeyValue::Hash { .. } | DbKeyValue::List { .. }) => 1,
-            _ => 0,
-        }
+    /// The cell the pane shows.
+    pub fn current_cell(&self) -> Option<&DbCell> {
+        let (row, column) = self.current;
+        self.value.as_ref()?.rows.get(row?)?.get(column)
     }
 
     /// What "Copy" puts on the clipboard: the current cell's text.
     fn copy_text(&self) -> Option<String> {
-        let (row, column) = self.current;
-        match self.cell(row?, column)?.as_ref() {
+        match self.current_cell()? {
             DbCell::Text(text) | DbCell::Cut { text, .. } => Some(text.clone()),
             DbCell::Null | DbCell::Binary { .. } => None,
         }
@@ -374,14 +398,15 @@ impl Model {
                 open.loading = false;
                 match result {
                     Ok(detail) => {
-                        open.detail = Some(detail);
+                        let value = KeyValue::from(detail);
+                        let first = (!value.rows.is_empty()).then_some(0);
+                        open.current = (first, value.value_column());
+                        open.value = Some(value);
                         open.serial += 1;
                         open.error = None;
-                        let first = (open.rows() > 0).then_some(0);
-                        open.current = (first, open.value_column());
                     }
                     Err(error) => {
-                        open.detail = None;
+                        open.value = None;
                         open.error = Some(error);
                     }
                 }
@@ -398,7 +423,7 @@ impl Model {
             .keys
             .as_ref()
             .and_then(|keys| keys.open.as_ref())
-            .is_some_and(|open| open.detail.is_none() && open.error.is_none() && !open.loading);
+            .is_some_and(|open| open.value.is_none() && open.error.is_none() && !open.loading);
         if unread && let Some(Command::Db(command)) = self.read_key() {
             self.session.db.pending = Some(command);
         }
@@ -426,6 +451,12 @@ impl Model {
 }
 
 impl KeyBrowser {
+    /// The list was read with a search or a type: an empty one says "No keys
+    /// match.".
+    pub fn narrowed(&self) -> bool {
+        self.sent != (None, None)
+    }
+
     pub(super) fn of(db: u8) -> Self {
         Self {
             db,

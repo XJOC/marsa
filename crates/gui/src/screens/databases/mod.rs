@@ -1,5 +1,6 @@
 //! Databases (layout.md, "Databases screen"; ADR 0028): Marsa's servers and
-//! the sites' SQLite files, and the tables of the chosen one. Read-only.
+//! the sites' SQLite files, and the tables of the chosen one; or Valkey's
+//! keys ([`keys`]). Read-only.
 //!
 //! The menu in the header picks a source. The tables list on the start side
 //! filters as the user types, with no read; the detail lists the tables
@@ -14,7 +15,9 @@ use eframe::egui::{
 use marsa_core::types::{DbServer, DbSource, DbTableKind, DbTableRef, ServiceAction, ServiceId};
 
 use super::lines::{message, state};
-use crate::model::{Action, DbAction, DbScreen, DbTab, DbView, Model, OpenTable, QueryRun};
+use crate::model::{
+    Action, DbAction, DbScreen, DbTab, DbView, KeyBrowser, KeysAction, Model, OpenTable, QueryRun,
+};
 use crate::strings;
 use crate::theme::page::{DB_DETAIL_END, DB_LIST_END, DB_LIST_WIDTH};
 use crate::theme::{Direction, Section, Theme};
@@ -43,6 +46,10 @@ pub(crate) enum Choice {
     Source(DbSource),
     /// A stopped server: its row starts it.
     Start(DbServer),
+    /// A database of Valkey.
+    Keys(u8),
+    /// Valkey stopped: its row starts it.
+    StartValkey,
 }
 
 pub(crate) enum Body<'a> {
@@ -54,9 +61,14 @@ pub(crate) enum Body<'a> {
     SignInFailed(DbServer),
     Failed(String),
     Tables(Tables<'a>),
+    KeysStopped,
+    KeysSignInFailed,
+    Keys(&'a KeyBrowser),
 }
 
 mod columns;
+mod keys;
+mod pane;
 mod rows;
 mod sql;
 
@@ -94,10 +106,11 @@ pub(crate) struct Row {
 
 pub(crate) fn view(model: &Model) -> DatabasesView<'_> {
     let db = &model.session.db;
-    let label = db
-        .chosen
-        .as_ref()
-        .map_or_else(|| strings::CHOOSE_SOURCE.to_owned(), strings::source_label);
+    let label = match (&db.keys, &db.chosen) {
+        (Some(keys), _) => strings::keys_source(keys.db),
+        (None, Some(source)) => strings::source_label(source),
+        (None, None) => strings::CHOOSE_SOURCE.to_owned(),
+    };
     let mut choices = Vec::new();
     for info in db.sources.iter().flat_map(|sources| &sources.servers) {
         use marsa_core::types::ServiceState::{Running, Starting};
@@ -114,6 +127,16 @@ pub(crate) fn view(model: &Model) -> DatabasesView<'_> {
             };
             let text = strings::source_label(&source);
             choices.push((Choice::Source(source), text));
+        }
+    }
+    if let Some(info) = db.sources.as_ref().and_then(|s| s.valkey.as_ref()) {
+        use marsa_core::types::ServiceState::{Running, Starting};
+        if info.databases.is_empty() && !matches!(info.state, Running | Starting) {
+            choices.push((Choice::StartValkey, strings::START_VALKEY.to_owned()));
+        }
+        for database in &info.databases {
+            let text = strings::keys_choice(database.db, database.keys);
+            choices.push((Choice::Keys(database.db), text));
         }
     }
     for file in db.sources.iter().flat_map(|sources| &sources.files) {
@@ -133,7 +156,9 @@ pub(crate) fn view(model: &Model) -> DatabasesView<'_> {
             DbScreen::SignInFailed(server) => Body::SignInFailed(server),
             DbScreen::Failed(code) => Body::Failed(strings::error_text(&code)),
             DbScreen::Tables => Body::Tables(tables(model)),
-            DbScreen::KeysStopped | DbScreen::KeysSignInFailed | DbScreen::Keys => Body::Loading,
+            DbScreen::KeysStopped => Body::KeysStopped,
+            DbScreen::KeysSignInFailed => Body::KeysSignInFailed,
+            DbScreen::Keys => db.keys.as_ref().map_or(Body::Loading, Body::Keys),
         }
     };
     let switch = matches!(body, Body::Tables(_)).then_some(db.view);
@@ -208,6 +233,8 @@ pub(crate) fn show(ui: &mut Ui, view: &DatabasesView<'_>, theme: &Theme) -> Vec<
             actions.push(match &view.choices[index].0 {
                 Choice::Source(source) => Action::ChooseDbSource(source.clone()),
                 Choice::Start(server) => start(*server),
+                Choice::Keys(db) => Action::Keys(KeysAction::Database(*db)),
+                Choice::StartValkey => keys::start(),
             });
         }
     });
@@ -239,6 +266,22 @@ pub(crate) fn show(ui: &mut Ui, view: &DatabasesView<'_>, theme: &Theme) -> Vec<
             }
         }
         Body::Failed(text) => message(ui, theme, text),
+        Body::KeysStopped => {
+            let button = Button::primary(strings::START_VALKEY);
+            let how = strings::VALKEY_STOPPED_HOW;
+            if state(ui, theme, strings::VALKEY_STOPPED, how, Some(button)) {
+                actions.push(keys::start());
+            }
+        }
+        Body::KeysSignInFailed => {
+            let sentence = strings::VALKEY_SIGN_IN_FAILED;
+            let button = Button::primary(strings::TRY_AGAIN);
+            let how = strings::VALKEY_SIGN_IN_HOW;
+            if state(ui, theme, sentence, how, Some(button)) {
+                actions.push(Action::ReadDbSources);
+            }
+        }
+        Body::Keys(browser) => keys::show(ui, theme, browser, &mut actions),
         Body::Tables(tables) => match &tables.none {
             Some(none) => {
                 state(ui, theme, none, strings::NO_TABLES_HOW, None);

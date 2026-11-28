@@ -167,9 +167,10 @@ fn the_search_reads_on_enter_and_more_keys_goes_on_with_it() {
     assert_eq!(request.cursor, 9);
     // One read at a time.
     assert!(act(&mut model, KeysAction::More).is_none());
-    // A key given twice is listed once.
-    answer_keys(&mut model, id, page(&["cache:1", "cache:2"], 0));
-    assert_eq!(names(&model), ["cache:1", "cache:2"]);
+    // The list stays in the names' order, and a key given twice is listed
+    // once.
+    answer_keys(&mut model, id, page(&["cache:1", "cache:0"], 0));
+    assert_eq!(names(&model), ["cache:0", "cache:1"]);
     let list = browser(&model).list.as_ref().unwrap();
     assert_eq!((list.unshown, list.more()), (2, false));
     assert!(act(&mut model, KeysAction::More).is_none());
@@ -203,7 +204,7 @@ fn an_answer_to_a_read_the_user_moved_on_from_is_dropped() {
     let (first, _) = key_read(act(&mut model, KeysAction::Open("new".into())));
     key_read(act(&mut model, KeysAction::Open("next".into())));
     answer_key(&mut model, first, DbKeyValue::Other { name: "x".into() });
-    assert!(browser(&model).open.as_ref().unwrap().detail.is_none());
+    assert!(browser(&model).open.as_ref().unwrap().value.is_none());
 }
 
 #[test]
@@ -213,7 +214,8 @@ fn the_value_s_grid_copies_the_current_cell() {
     let open = browser(&model).open.as_ref().unwrap();
     // A new value starts at its first row, on the value's column.
     assert_eq!(open.current, (Some(0), 1));
-    assert_eq!((open.rows(), open.serial), (2, 1));
+    let rows = open.value.as_ref().unwrap().rows.len();
+    assert_eq!((rows, open.serial), (2, 1));
     act(
         &mut model,
         KeysAction::Current {
@@ -230,35 +232,38 @@ fn the_value_s_grid_copies_the_current_cell() {
 }
 
 #[test]
-fn each_value_gives_its_cells() {
+fn each_value_gives_its_rows() {
     let text = |text: &str| DbCell::Text(text.into());
-    let cells = |value: DbKeyValue| {
-        let open = OpenKey {
-            detail: Some(DbKeyDetail { ttl: None, value }),
-            ..OpenKey::default()
-        };
-        let row: Vec<_> = (0..2)
-            .map(|column| open.cell(0, column).map(|cell| cell.into_owned()))
-            .collect();
-        (open.rows(), row)
+    let rows = |value: DbKeyValue| {
+        let value = KeyValue::from(DbKeyDetail {
+            ttl: Some(9),
+            value,
+        });
+        (value.rows, value.total)
     };
     let list = DbKeyValue::List {
         items: vec![text("job")],
+        total: 900,
+    };
+    assert_eq!(rows(list), (vec![vec![text("0"), text("job")]], 900));
+    let set = DbKeyValue::Set {
+        members: vec![text("12")],
         total: 1,
     };
-    assert_eq!(cells(list), (1, vec![Some(text("0")), Some(text("job"))]));
+    assert_eq!(rows(set), (vec![vec![text("12")]], 1));
     let zset = DbKeyValue::Zset {
         members: vec![(text("omar"), "12.5".into())],
         total: 1,
     };
-    assert_eq!(
-        cells(zset),
-        (1, vec![Some(text("omar")), Some(text("12.5"))])
-    );
-    let string = DbKeyValue::String { value: text("v") };
-    assert_eq!(cells(string).1[0], Some(text("v")));
+    assert_eq!(rows(zset), (vec![vec![text("omar"), text("12.5")]], 1));
+    let cut = DbCell::Cut {
+        text: "ab".into(),
+        bytes: 900,
+    };
+    let string = DbKeyValue::String { value: cut.clone() };
+    assert_eq!(rows(string), (vec![vec![cut]], 900));
     let other = DbKeyValue::Other { name: "x".into() };
-    assert_eq!(cells(other), (0, vec![None, None]));
+    assert_eq!(rows(other), (Vec::new(), 0));
 }
 
 #[test]
@@ -275,7 +280,7 @@ fn a_key_that_is_gone_and_a_failed_read_say_so() {
         result: Err((DB_KEY_NOT_FOUND.into(), None)),
     }));
     let open = browser(&model).open.as_ref().unwrap();
-    assert!(open.detail.is_none());
+    assert!(open.value.is_none());
     assert_eq!(open.error.as_ref().unwrap().0, DB_KEY_NOT_FOUND);
 
     let (id, _) = keys_read(act(&mut model, KeysAction::Submit));
@@ -299,10 +304,11 @@ fn leaving_drops_what_was_read_and_a_return_reads_it_again() {
     assert!(keys.list.is_none());
     assert_eq!(keys.search, "ca");
     let open = keys.open.as_ref().unwrap();
-    assert_eq!((open.name.as_str(), open.detail.is_none()), ("cart", true));
+    assert_eq!((open.name.as_str(), open.value.is_none()), ("cart", true));
 
     let (id, request) = keys_read(opened(&mut model, running()));
     assert_eq!(request.pattern, None, "the search was never sent");
+    assert!(!browser(&model).narrowed());
     answer_keys(&mut model, id, page(&["cart"], 0));
     let (_, request) = key_read(model.next_command());
     assert_eq!(request.key, "cart");
