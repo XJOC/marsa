@@ -40,6 +40,8 @@ use crate::strings;
 
 /// The wait before the next attempt to connect.
 const RETRY: Duration = Duration::from_secs(1);
+/// The longest a closing window waits for the daemon to close the browser.
+const CLOSE_WAIT: Duration = Duration::from_secs(2);
 /// The daemon's answer to `/v1/autostart` on a system it does not support.
 const AUTOSTART_UNSUPPORTED: &str = "autostart_unsupported";
 
@@ -99,6 +101,8 @@ pub enum Command {
     FollowSiteLog(String),
     /// Logs no longer shows a site's log: stop following it.
     StopSiteLog,
+    /// The window closes: close the database browser, answer here, and end.
+    Quit(mpsc::Sender<()>),
 }
 
 /// An update or a command, and the session it belongs to: the one that
@@ -143,6 +147,18 @@ impl Handle {
             repaint: Arc::new(OnceLock::new()),
             _demo: Some(demo),
         }
+    }
+
+    /// The window closes while the daemon may hold its database
+    /// connections: has them closed, which stops a running statement, and
+    /// waits for that, at most [`CLOSE_WAIT`]. The process ends next, and
+    /// would take a request not yet sent with it.
+    pub fn close_databases(&self, session: u64) {
+        let (done, closed) = mpsc::channel();
+        self.send(session, Command::Quit(done));
+        // An error: the time ran out, or the bridge dropped the command and
+        // `done` with it.
+        let _ = closed.recv_timeout(CLOSE_WAIT);
     }
 
     /// Sends a command the window made in `session`. The bridge drops it if
@@ -394,6 +410,20 @@ async fn session(
                     Command::SetDumpsCapture(on) => dumps.send(dumps::Job::Capture(on)),
                     Command::FollowSiteLog(site) => site_log.follow(&client, window, site),
                     Command::StopSiteLog => site_log.stop(),
+                    Command::Quit(done) => {
+                        // Nothing else of this window may follow the close.
+                        tasks.shutdown().await;
+                        match tokio::time::timeout(CLOSE_WAIT, client.db_close()).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                tracing::warn!(code = err.code(), "the browser was not closed");
+                            }
+                            Err(_) => tracing::warn!("the daemon did not close the browser in time"),
+                        }
+                        // The window may have given up waiting.
+                        let _ = done.send(());
+                        return End::Closed;
+                    }
                     command => {
                         let (window, reread) = (window.clone(), reread.clone());
                         run_command(&mut tasks, &client, command, window, reread);
@@ -673,6 +703,8 @@ fn run_command(
             Command::ReadDumps | Command::ClearDumps | Command::SetDumpsCapture(_) => None,
             // The session's site log reader runs these.
             Command::FollowSiteLog(_) | Command::StopSiteLog => None,
+            // The session ends itself.
+            Command::Quit(_) => None,
             Command::SetXdebug(enabled) => Some(match client.set_xdebug(enabled).await {
                 Ok(state) => {
                     tracing::info!(enabled, "Xdebug changed");

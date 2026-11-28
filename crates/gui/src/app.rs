@@ -231,9 +231,12 @@ impl eframe::App for App {
         self.aids.inject(raw_input);
     }
 
-    /// The window closes: its size goes to `gui.toml` (once, and only when
-    /// it changed).
+    /// The window closes: the daemon closes its database connections, and
+    /// its size goes to `gui.toml` (once, and only when it changed).
     fn on_exit(&mut self) {
+        if self.model.holds_databases() {
+            self.bridge.close_databases(self.model.session.number);
+        }
         if let Some(size) = self.size_to_save() {
             self.prefs.window = Some(size);
             self.save_prefs();
@@ -321,9 +324,17 @@ fn open_url(ctx: &egui::Context, url: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use axum::routing::{MethodRouter, get, post};
+    use axum::{Json, Router};
     use eframe::App as _;
+    use marsa_core::types::DbSources;
 
     use super::*;
+    use crate::bridge::fake::{Fake, PATIENCE};
     use crate::prefs::Appearance;
     use crate::widgets::harness::Harness;
 
@@ -439,6 +450,74 @@ mod tests {
             Prefs::load(&path).window_size(),
             crate::theme::SIZE.window_min
         );
+    }
+
+    /// A window on a fake daemon whose `/v1/db/close` is `close`, connected.
+    fn on_fake_daemon(close: MethodRouter) -> (Fake, App) {
+        let fake = Fake::start(
+            Router::new()
+                .route(
+                    "/v1/db/sources",
+                    get(|| async { Json(DbSources::default()) }),
+                )
+                .route("/v1/db/close", close),
+        );
+        let ctx = egui::Context::default();
+        let bridge = bridge::attach(fake.data_dir().to_path_buf()).expect("a thread");
+        let dir = fake.data_dir().to_path_buf();
+        let mut app = App::new(&ctx, bridge, dir, Prefs::default(), Instant::now());
+        let until = Instant::now() + PATIENCE;
+        while !app.model.is_connected() {
+            assert!(Instant::now() < until, "no connection");
+            take_updates(&app.bridge, &mut app.model);
+            thread::sleep(Duration::from_millis(10));
+        }
+        (fake, app)
+    }
+
+    #[test]
+    fn closing_the_window_on_databases_closes_the_browser_before_it_ends() {
+        let answered = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&answered);
+        let close = post(move || {
+            let done = Arc::clone(&done);
+            async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                done.store(true, Ordering::SeqCst);
+            }
+        });
+        let (fake, mut app) = on_fake_daemon(close);
+        app.run(
+            &egui::Context::default(),
+            Action::Navigate(Route::Databases),
+        );
+        app.on_exit();
+        // The process ends next: the daemon must have answered by now.
+        assert!(answered.load(Ordering::SeqCst));
+        assert_eq!(fake.count("POST /v1/db/close"), 1);
+    }
+
+    #[test]
+    fn a_daemon_that_never_answers_does_not_hold_the_window_open() {
+        let close = post(std::future::pending::<()>);
+        let (fake, mut app) = on_fake_daemon(close);
+        app.run(
+            &egui::Context::default(),
+            Action::Navigate(Route::Databases),
+        );
+        let started = Instant::now();
+        app.on_exit();
+        assert!(started.elapsed() < PATIENCE, "{:?}", started.elapsed());
+        fake.wait_for("POST /v1/db/close");
+    }
+
+    #[test]
+    fn closing_the_window_elsewhere_leaves_the_browser_alone() {
+        let (fake, mut app) = on_fake_daemon(post(|| async {}));
+        app.on_exit();
+        thread::sleep(Duration::from_millis(300));
+        // The CLI may be running a statement of its own.
+        assert_eq!(fake.count("POST /v1/db/close"), 0);
     }
 
     #[test]
