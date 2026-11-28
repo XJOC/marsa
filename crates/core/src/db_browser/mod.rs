@@ -37,6 +37,9 @@ pub const VALUE_BYTES: usize = 64 * 1024;
 pub const RESULT_ROWS: usize = 1_000;
 /// Cell text of a SQL result.
 pub const RESULT_BYTES: usize = 8 * 1024 * 1024;
+/// Databases of one server, and tables and views of one source. A longer
+/// catalog is an error, never a shorter list.
+pub const CATALOG_ENTRIES: usize = 10_000;
 /// Length of one SQL statement of the user's.
 pub const SQL_BYTES: usize = 256 * 1024;
 

@@ -84,10 +84,13 @@ pub fn page_sql(
 /// The exact number of rows. The daemon gives it a short time limit, and uses
 /// the catalog's estimate when it does not finish.
 pub fn count_sql(engine: Engine, table: &DbTableRef) -> Result<String, SqlError> {
-    Ok(format!(
-        "SELECT COUNT(*) FROM {}",
-        table_name(engine, table)?
-    ))
+    let mut sql = format!("SELECT COUNT(*) FROM {}", table_name(engine, table)?);
+    // Without a condition SQLite counts a table in one step, which its
+    // progress handler cannot stop. With one, it walks the rows.
+    if engine == Engine::Sqlite {
+        sql.push_str(" WHERE 1");
+    }
+    Ok(sql)
 }
 
 /// One whole value: `column` of the row whose primary key columns `key` equal

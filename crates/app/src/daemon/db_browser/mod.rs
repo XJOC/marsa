@@ -34,6 +34,7 @@
 //! | 409 `db_server_not_running` | the server is not Marsa's running one |
 //! | 502 `db_sign_in_failed` | the server refused `root`, or Valkey a client, with no password; `detail` says why |
 //! | 502 `db_unavailable` | the database could not be opened or read; `detail` says why |
+//! | 502 `db_catalog_too_large` | the server has more than 10,000 databases, or the source more than 10,000 tables and views |
 //! | 504 `db_timeout` | the database did not answer within 10 seconds |
 //!
 //! What the log keeps: the source, the kind of request, its time, and the

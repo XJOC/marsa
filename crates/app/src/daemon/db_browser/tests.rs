@@ -6,12 +6,13 @@ use std::sync::{Arc, Mutex};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::{ConnectOptions, Connection};
+use sqlx::{ConnectOptions, Connection, Row};
 use tempfile::TempDir;
 
-use marsa_core::types::DbServer;
+use marsa_core::db_browser::Engine;
+use marsa_core::types::{DbServer, DbTableRef};
 
-use super::{servers, sqlite};
+use super::{REQUEST_LIMIT, servers, sqlite};
 use crate::daemon::http::test_router::TestRouter;
 use crate::daemon::state::Daemon;
 
@@ -864,4 +865,93 @@ fn a_server_connection_keeps_few_prepared_statements() {
     let kept = format!("statement_cache_capacity: {}", servers::STATEMENT_CACHE);
     assert!(format!("{:?}", servers::mysql_options(3306, Some("shop"))).contains(&kept));
     assert!(format!("{:?}", servers::pg_options(5432, None)).contains(&kept));
+}
+
+/// A view whose first page comes at once and whose count never ends.
+const ENDLESS_VIEW: &str = "CREATE TABLE n (i INTEGER);\
+     INSERT INTO n (i) WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 2000) \
+     SELECT i FROM r;\
+     CREATE VIEW endless AS SELECT a.i FROM n a, n b, n c, n d;";
+
+#[tokio::test]
+async fn a_count_past_its_limit_stops_and_the_page_comes_with_the_estimate() {
+    let app = App::new();
+    make_file(&app.site("blog").await, ENDLESS_VIEW).await;
+    let started = std::time::Instant::now();
+    let (status, json) = page(&app, "endless", json!({ "count": true })).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["rows"].as_array().unwrap().len(), 500);
+    assert_eq!(json["total"]["exact"], false, "{}", json["total"]);
+    assert!(started.elapsed() < REQUEST_LIMIT, "{:?}", started.elapsed());
+}
+
+/// `COUNT(*)` of a whole table is one step of SQLite's machine, which the
+/// progress handler cannot stop: the statement must walk the rows.
+#[tokio::test]
+async fn a_tables_count_can_be_interrupted() {
+    let app = App::new();
+    let file = make_file(&app.site("blog").await, SHOP).await;
+    let table = DbTableRef {
+        schema: None,
+        name: "users".into(),
+    };
+    let sql = format!(
+        "EXPLAIN {}",
+        marsa_core::db_browser::count_sql(Engine::Sqlite, &table).unwrap()
+    );
+    let mut connection = sqlite::open(&file).await.unwrap();
+    let steps: Vec<String> = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .fetch_all(&mut connection)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get("opcode"))
+        .collect();
+    connection.close().await.unwrap();
+    assert!(!steps.iter().any(|step| step == "Count"), "{steps:?}");
+    assert!(steps.iter().any(|step| step == "Next"), "{steps:?}");
+}
+
+/// A file with `tables` empty tables.
+async fn many_tables(app: &App, tables: usize) -> PathBuf {
+    let file = make_file(&app.site("blog").await, "SELECT 1").await;
+    let mut script = String::from("BEGIN;");
+    for number in 0..tables {
+        script.push_str(&format!("CREATE TABLE t{number} (a);"));
+    }
+    script.push_str("COMMIT;");
+    let mut connection = SqliteConnectOptions::new()
+        .filename(&file)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(script))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    file
+}
+
+#[tokio::test]
+async fn one_table_more_than_the_limit_is_an_error_never_a_shorter_list() {
+    let app = App::new();
+    let file = many_tables(&app, 10_001).await;
+    let (status, json) = app.tables(blog()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(json["error"]["code"], "db_catalog_too_large");
+
+    let mut connection = SqliteConnectOptions::new()
+        .filename(&file)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE t0")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let (status, json) = app.tables(blog()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["tables"].as_array().unwrap().len(), 10_000);
 }

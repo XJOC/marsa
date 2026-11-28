@@ -292,12 +292,7 @@ async fn read(
             let flag = Arc::new(AtomicBool::new(false));
             {
                 let flag = Arc::clone(&flag);
-                let mut handle = conn
-                    .lock_handle()
-                    .await
-                    .map_err(|err| unavailable(err.to_string()))?;
-                // Every 1,000 steps of SQLite's machine: false interrupts.
-                handle.set_progress_handler(1000, move || !flag.load(Ordering::Relaxed));
+                sqlite::interrupt_unless(&mut conn, move || !flag.load(Ordering::Relaxed)).await?;
             }
             queries.set_stop(id, Stop::Sqlite(flag));
             let read = collect(Engine::Sqlite, sql.fetch(&mut conn), rows::sqlite_cell).await;
@@ -394,10 +389,7 @@ fn query_error(err: sqlx::Error) -> HttpError {
     let said = db.message().to_owned();
     let code = db.code().map(|code| code.into_owned());
     let read_only = code.as_deref() == Some("25006")
-        || code
-            .as_deref()
-            .and_then(|code| code.parse::<i32>().ok())
-            .is_some_and(|code| code & 0xff == SQLITE_READONLY)
+        || sqlite::primary_code(db) == Some(SQLITE_READONLY)
         || db
             .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
             .is_some_and(|db| db.number() == MYSQL_READ_ONLY);
