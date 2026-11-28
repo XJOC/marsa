@@ -199,7 +199,7 @@ impl Supervisor {
             events,
             log: Arc::new(Mutex::new(open_log(spec.id, logs_dir))),
         };
-        let stop_limit = stop_limit(&spec.stop);
+        let stop_limit = group::stop_limit(&spec);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(supervise(spec, shared, cancel.clone()));
         Ok(ServiceHandle {
@@ -457,7 +457,7 @@ async fn stop(child: &mut Child, spec: &ServiceSpec, shared: &Shared) {
         warn!(service = %spec.id, %err, "cannot kill the process");
     }
     if let Some(group) = group {
-        group.end_after_leader(tokio::time::Instant::now()).await;
+        group.end_after_kill().await;
     }
 }
 

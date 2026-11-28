@@ -15,7 +15,7 @@ use tokio::process::Command;
 #[cfg(unix)]
 use super::TOOL_LIMIT;
 
-/// Sends `signal` to `pid`: runs `/bin/kill -TERM|-INT|-QUIT|-KILL <pid>`,
+/// Sends `signal` to `pid`: runs `/bin/kill -TERM|-INT|-QUIT|-KILL -- <pid>`,
 /// with an absolute path and an argument array (ADR 0009), for up to 2 s. It
 /// does not check who the process is: the caller must, right before
 /// (ADR 0009).

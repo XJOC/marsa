@@ -103,13 +103,23 @@ fn fake_service() {
             use tokio::signal::unix::{SignalKind, signal};
             let _term = (mode == "parent-deaf")
                 .then(|| signal(SignalKind::terminate()).expect("a SIGTERM handler"));
+            use tokio::io::AsyncBufReadExt as _;
             let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
                 .args(["fake_service", "--exact", "--nocapture"])
                 .env(FAKE, "hang")
-                .stdout(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .expect("the child starts");
+            // Its SIGTERM handler is in place once it says so: a stop
+            // before that would end it with the default action.
+            let out = child.stdout.take().expect("piped");
+            let mut lines = tokio::io::BufReader::new(out).lines();
+            while let Some(line) = lines.next_line().await.expect("its output") {
+                if line == "fake ready" {
+                    break;
+                }
+            }
             println!("fake child {}", child.id().expect("it runs"));
             // The child never ends by itself: only a stop ends either.
             let _ = child.wait().await;
@@ -488,12 +498,16 @@ async fn fake_child(handle: &ServiceHandle) -> u32 {
 }
 
 /// Kills the process at the end of a test that failed before it was gone.
+/// Nothing after a test that passed: the pid may be someone else's by then.
 #[cfg(unix)]
 struct KillOnDrop(u32);
 
 #[cfg(unix)]
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
         let _ = std::process::Command::new("/bin/kill")
             .args(["-KILL", &self.0.to_string()])
             .stderr(std::process::Stdio::null())

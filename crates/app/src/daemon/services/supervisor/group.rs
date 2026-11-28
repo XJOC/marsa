@@ -9,7 +9,10 @@
 //!   the group's id, cannot be another process's;
 //! - once it is waited for, only while no process has that pid: the system
 //!   gives a pid to a new process only when no group has it as its id, so
-//!   a group with that id and no such process is still ours.
+//!   a group with that id and no such process is still ours. Between that
+//!   look and the signal, our group could end and its id go round to a new
+//!   group whose leader already exited: that needs every pid to be handed
+//!   out again within a few milliseconds.
 //!
 //! Windows has no groups to signal: there the Job Object ends what is left
 //! with the daemon (ADR 0017).
@@ -19,16 +22,40 @@ use std::time::Duration;
 
 use marsa_core::orphan::Liveness;
 use marsa_core::platform::process::{self, Signal};
+use marsa_core::services::ServiceSpec;
 use marsa_core::types::ServiceId;
 use tokio::time::Instant;
 use tracing::warn;
 
+/// What a stop with `own_group` may take on top of `super::stop_limit`:
+/// the wait for the rest of the group, its SIGKILL, [`KILL_WAIT`], and the
+/// `/bin/kill` and `ps` runs in between (up to 2 s each when one hangs).
+const GROUP_MARGIN: Duration = Duration::from_secs(10);
+
+/// How long the stop of `spec` may take: `super::stop_limit` of its stop
+/// method, plus [`GROUP_MARGIN`] when it leads a group.
+pub(super) fn stop_limit(spec: &ServiceSpec) -> Duration {
+    let limit = super::stop_limit(&spec.stop);
+    if spec.own_group {
+        limit.saturating_add(GROUP_MARGIN)
+    } else {
+        limit
+    }
+}
+
 /// Sends `signal` to the child `pid`, or to the group it leads. The child is
-/// not yet waited for.
+/// not yet waited for. A child that left its group (`setsid`) gets it
+/// alone, so it still hears the stop.
 pub(super) async fn signal_child(pid: u32, group: Option<Group>, signal: Signal) -> io::Result<()> {
-    match group {
-        Some(group) => group.signal_with_leader(signal).await,
-        None => process::send_signal(pid, signal).await,
+    let Some(group) = group else {
+        return process::send_signal(pid, signal).await;
+    };
+    match group.signal_with_leader(signal).await {
+        Err(err) if err.kind() != io::ErrorKind::Unsupported => {
+            warn!(service = %group.id, %err, "{} to the group failed; to the child alone", signal.name());
+            process::send_signal(pid, signal).await
+        }
+        sent => sent,
     }
 }
 
@@ -69,6 +96,13 @@ impl Group {
         }
     }
 
+    /// After the SIGKILL of the whole group and the wait for the leader: the
+    /// others may still be on their way out (a zombie until its new parent
+    /// collects it), so they get [`KILL_WAIT`] before a second look.
+    pub(super) async fn end_after_kill(self) {
+        self.end_after_leader(Instant::now() + KILL_WAIT).await;
+    }
+
     /// After the leader was waited for: waits for the rest of the group to
     /// end, until `deadline`, then sends it SIGKILL if it is still ours, and
     /// waits [`KILL_WAIT`] more.
@@ -106,5 +140,31 @@ impl Group {
             }
             tokio::time::sleep(POLL).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use marsa_core::types::{SiteKey, WorkerKind};
+    use marsa_core::workers::{WorkerPaths, worker_spec};
+    use std::path::Path;
+
+    #[test]
+    fn only_a_spec_that_leads_a_group_gets_the_group_margin() {
+        let paths = WorkerPaths {
+            php: Path::new("/data/runtimes/php/8.4.1/bin/php"),
+            php_ini: Path::new("/data/config/php/8.4/php.ini"),
+            root: Path::new("/sites/shop"),
+        };
+        let site = SiteKey::new("shop").expect("a valid site name");
+        let worker = worker_spec(WorkerKind::Schedule, site, paths);
+        let alone = ServiceSpec {
+            own_group: false,
+            ..worker.clone()
+        };
+        let base = super::super::stop_limit(&worker.stop);
+        assert_eq!(stop_limit(&alone), base);
+        assert_eq!(stop_limit(&worker), base + GROUP_MARGIN);
     }
 }
