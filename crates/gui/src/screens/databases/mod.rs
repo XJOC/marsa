@@ -133,6 +133,7 @@ pub(crate) fn view(model: &Model) -> DatabasesView<'_> {
             DbScreen::SignInFailed(server) => Body::SignInFailed(server),
             DbScreen::Failed(code) => Body::Failed(strings::error_text(&code)),
             DbScreen::Tables => Body::Tables(tables(model)),
+            DbScreen::KeysStopped | DbScreen::KeysSignInFailed | DbScreen::Keys => Body::Loading,
         }
     };
     let switch = matches!(body, Body::Tables(_)).then_some(db.view);
