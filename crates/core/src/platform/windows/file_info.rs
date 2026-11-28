@@ -16,6 +16,8 @@ pub(crate) struct FileInfo {
     /// The serial number of the volume.
     pub(crate) volume: u64,
     /// The file's number on that volume: the same for every name of it.
+    /// On ReFS, whose numbers are 128 bits, two files may share it: it
+    /// tells a reader where to go on, never whether a file may be read.
     pub(crate) index: u64,
     /// The names of the file (hard links).
     pub(crate) links: u64,

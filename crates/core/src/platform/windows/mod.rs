@@ -36,7 +36,7 @@ pub(crate) use detached::{DetachedProcess, join_kill_on_close_job, spawn_detache
 pub use elevation::{
     Elevated, ElevatedProcess, current_user_sid, is_elevated, process_is_elevated, run_elevated,
 };
-pub(crate) use file_info::{FileInfo, file_info};
+pub(crate) use file_info::file_info;
 pub use registry::vc_runtime_version;
 pub use roots::{Roots, root_certificates};
 

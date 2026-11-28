@@ -51,9 +51,10 @@ pub fn identity(file: &File) -> io::Result<FileIdentity> {
 /// - Windows: `FILE_FLAG_OPEN_REPARSE_POINT` opens a link or junction itself,
 ///   so the caller sees `is_symlink()` on the open file and refuses it.
 /// - macOS and Linux: a plain open, which follows a link. The caller looks at
-///   the path before (`symlink_metadata`) and compares the open file's device
-///   and inode with it after (`crate::fs::file_id`), so a link swapped in
-///   between is seen. `O_NOFOLLOW` would need the `libc` crate.
+///   the path before (`symlink_metadata`) and compares its device and inode
+///   (`crate::fs::file_id`) with the open file's ([`identity`]) after, so a
+///   link swapped in between is seen. `O_NOFOLLOW` would need the `libc`
+///   crate.
 ///
 /// Rust opens files with full sharing on Windows, so a reader never stops
 /// Laravel from writing or rotating its log (architecture.md section 9).
