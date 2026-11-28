@@ -63,8 +63,11 @@ pub enum DbUpdate {
         id: u64,
         result: Result<DbValue, String>,
     },
+    /// The columns of `table` of `source`.
     Table {
         id: u64,
+        source: DbSource,
+        table: DbTableRef,
         result: Result<DbTable, String>,
     },
     Keys {
@@ -85,6 +88,46 @@ pub enum DbUpdate {
         id: u64,
         result: Result<DbResult, QueryError>,
     },
+}
+
+/// A statement whose end is awaited. Dropped before that (its session
+/// ended), its job is cancelled: nobody would read the rows, and the source
+/// stays busy until it ends. The session's own client asks, so only the
+/// daemon that runs the job can hear it.
+struct Awaited {
+    client: DaemonClient,
+    job: Option<u64>,
+}
+
+impl Awaited {
+    fn new(client: &DaemonClient, job: u64) -> Self {
+        Self {
+            client: client.clone(),
+            job: Some(job),
+        }
+    }
+
+    fn ended(&mut self) {
+        self.job = None;
+    }
+}
+
+impl Drop for Awaited {
+    fn drop(&mut self) {
+        let Some(job) = self.job.take() else {
+            return;
+        };
+        // `tokio::spawn` panics outside a runtime, and a drop may run there.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(async move {
+            if let Err(err) = client.cancel_job(job).await {
+                tracing::debug!(code = err.code(), "the statement was not cancelled");
+            }
+        });
+    }
 }
 
 /// Runs `command`, and the update it gives, if any. A statement sends its
@@ -116,10 +159,15 @@ pub(super) async fn run(
             id,
             result: client.db_cell(&request).await.map_err(code),
         })),
-        DbCommand::ReadTable { id, source, table } => Some(Update::Db(DbUpdate::Table {
-            id,
-            result: client.db_table(&source, &table).await.map_err(code),
-        })),
+        DbCommand::ReadTable { id, source, table } => {
+            let result = client.db_table(&source, &table).await.map_err(code);
+            Some(Update::Db(DbUpdate::Table {
+                id,
+                source,
+                table,
+                result,
+            }))
+        }
         DbCommand::ReadKeys { id, request } => Some(Update::Db(DbUpdate::Keys {
             id,
             result: client.db_keys(&request).await.map_err(failed),
@@ -140,7 +188,9 @@ pub(super) async fn run(
                 id,
                 result: Ok(job),
             }));
+            let mut awaited = Awaited::new(client, job);
             let result = client.db_query_result(job).await.map_err(failed);
+            awaited.ended();
             Some(Update::Db(DbUpdate::Query { id, result }))
         }
         DbCommand::CancelQuery { job } => {

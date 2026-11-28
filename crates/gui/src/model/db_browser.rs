@@ -159,6 +159,7 @@ impl DbBrowserState {
         self.query = None;
         self.query_id = None;
         self.tables_id = None;
+        self.table_id = None;
         self.error = None;
         self.filter.clear();
         self.keys_id = None;
@@ -238,6 +239,14 @@ impl Model {
                 .any(|site| site.kind == marsa_core::types::SiteKind::Laravel)
     }
 
+    /// Whether the daemon may hold database connections, or run a statement,
+    /// for this window: the screen is open, or was just left and its close
+    /// has not gone.
+    pub fn holds_databases(&self) -> bool {
+        let leaving = self.session.db.pending == Some(DbCommand::Close);
+        self.is_connected() && (self.route == Route::Databases || leaving)
+    }
+
     /// The Databases screen opened: read what can be opened.
     pub(super) fn open_databases(&mut self) -> Option<Command> {
         if !self.is_connected() {
@@ -306,6 +315,7 @@ impl Model {
         db.key_id = None;
         if db.chosen.as_ref() != Some(&source) {
             db.open = None;
+            db.table_id = None;
             db.query = None;
             db.query_id = None;
         }
