@@ -2,26 +2,19 @@
 # End to end: Valkey 8.1 as a service of marsad, with a real server (ADR
 # 0023). On a GitHub runner.
 #
-# Valkey is not in the signed manifest yet, and its release is a draft until
-# the owner publishes it, so the archive comes from VALKEY_ARCHIVE: a local
-# path, or an https URL. `{platform}` in it becomes this system's platform
-# (darwin-arm64, darwin-x64, linux-x64, linux-arm64). A URL is checked
-# against the `sha256sums.txt` beside it, as `cargo xtask manifest build`
-# checks it. The archive is unpacked where `marsa install valkey` would put
-# it. Every marsa command runs with --data-dir in a new folder; no sudo.
+# Valkey is not in the signed manifest yet, so the script takes the archive of
+# our published release, or the one VALKEY_ARCHIVE names: a local path, or an
+# https URL. `{platform}` in it becomes this system's platform (darwin-arm64,
+# darwin-x64, linux-x64, linux-arm64). A URL is checked against the
+# `sha256sums.txt` beside it, as `cargo xtask manifest build` checks it. The
+# archive is unpacked where `marsa install valkey` would put it. Every marsa
+# command runs with --data-dir in a new folder; no sudo.
 #
 # Before it: `cargo build --release -p marsa`.
 set -euo pipefail
 
 if [ "${CI:-}" != "true" ]; then
   echo "This script downloads Valkey and PHP. It runs only with CI=true (a runner)." >&2
-  exit 2
-fi
-if [ -z "${VALKEY_ARCHIVE:-}" ]; then
-  echo "Set VALKEY_ARCHIVE to a Valkey archive of .github/workflows/valkey-build.yml: a local" >&2
-  echo "path, or an https URL, where {platform} is replaced, for example" >&2
-  echo "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/valkey-8.1.11-{platform}.tar.gz" >&2
-  echo "Nothing was built or started." >&2
   exit 2
 fi
 
@@ -39,7 +32,10 @@ case "$(uname -s)-$(uname -m)" in
   Linux-aarch64) PLATFORM=linux-arm64 ;;
   *) echo "no Valkey build in this script for $(uname -sm)" >&2; exit 2 ;;
 esac
-ARCHIVE=${VALKEY_ARCHIVE//\{platform\}/$PLATFORM}
+# Not inside `${VALKEY_ARCHIVE:-...}`: the `}` of {platform} would end it.
+RELEASE="https://github.com/XJOC/marsa/releases/download/valkey-$VERSION-r1/valkey-$VERSION-{platform}.tar.gz"
+ARCHIVE=${VALKEY_ARCHIVE:-$RELEASE}
+ARCHIVE=${ARCHIVE//\{platform\}/$PLATFORM}
 VK=$DATA/runtimes/valkey/$VERSION
 
 step() { printf '\n\n===== %s =====\n' "$*"; }
@@ -106,8 +102,8 @@ mkdir -p "$VK" "$DATA/config"
 FILE=$RUNNER_TEMP/$(basename "$ARCHIVE")
 case "$ARCHIVE" in
   https://*)
-    run curl -fsSL -o "$FILE" "$ARCHIVE"
-    run curl -fsSL -o "$RUNNER_TEMP/sha256sums.txt" "$(dirname "$ARCHIVE")/sha256sums.txt"
+    run curl -fsSL --retry 5 --retry-delay 5 -o "$FILE" "$ARCHIVE"
+    run curl -fsSL --retry 5 --retry-delay 5 -o "$RUNNER_TEMP/sha256sums.txt" "$(dirname "$ARCHIVE")/sha256sums.txt"
     want=$(awk -v name="$(basename "$ARCHIVE")" '$2 == name || $2 == "*" name { print $1 }' "$RUNNER_TEMP/sha256sums.txt")
     got=$(shasum -a 256 "$FILE" | awk '{print $1}')
     [ -n "$want" ] || fail "sha256sums.txt does not list $(basename "$ARCHIVE")"
