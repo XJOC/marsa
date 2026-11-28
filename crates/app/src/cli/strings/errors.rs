@@ -411,6 +411,9 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "db_unavailable" => format!(
             "{service_first} did not answer as expected. Run \"marsa logs {id}\" to see why."
         ),
+        "db_catalog_too_large" => "There are more than 10,000 databases or tables here, so \
+             Marsa does not list them."
+            .into(),
         "db_timeout" => "The database took too long to answer, so Marsa stopped waiting.".into(),
         "db_read_only" => "This statement changes data, and \"marsa db\" is read-only, so the \
              database refused it."

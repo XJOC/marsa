@@ -42,6 +42,8 @@ pub const DAEMON_STOP_FAILED: &str = "daemon_stop_failed";
 pub const DAEMON_UNREACHABLE: &str = "daemon_unreachable";
 /// Another statement of the user's runs on the same database.
 pub const DB_BUSY: &str = "db_busy";
+/// A server has more databases, or a source more tables, than the browser lists.
+pub const DB_CATALOG_TOO_LARGE: &str = "db_catalog_too_large";
 /// The site has no SQLite file where Marsa looks for one.
 pub const DB_FILE_NOT_FOUND: &str = "db_file_not_found";
 /// The site's SQLite file leads out of the site's folder, or is not a regular file.
@@ -362,6 +364,7 @@ pub const ALL: &[&str] = &[
     DAEMON_STOP_FAILED,
     DAEMON_UNREACHABLE,
     DB_BUSY,
+    DB_CATALOG_TOO_LARGE,
     DB_FILE_NOT_FOUND,
     DB_FILE_OUTSIDE_SITE,
     DB_KEY_NOT_FOUND,
