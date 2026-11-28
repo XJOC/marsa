@@ -113,3 +113,16 @@ unreachable_pub = "warn"
 [workspace.lints.clippy]
 await_holding_lock = "deny"
 unwrap_used = "deny"
+
+# What the release builds ship. Marsa must stay light, and `marsad` has a size
+# budget (ADR 0028): of the options measured on the three systems, these three
+# together give the smallest programs. `marsad-size.yml` builds its baseline
+# with the same keys and fails if they differ, so change both together.
+# `panic` stays "unwind": a panic in a tokio task must end that task only, and
+# "abort" would end `marsad`.
+[profile.release]
+codegen-units = 1
+lto = "fat"
+# No symbol table: a backtrace shows no function names. A panic still reports
+# its message, file, and line.
+strip = "symbols"
