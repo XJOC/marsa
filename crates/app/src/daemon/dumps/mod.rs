@@ -120,11 +120,24 @@ impl DumpsService {
         }
     }
 
-    /// Forgets every dump. The ids go on from where they were.
+    /// Forgets every dump. The ids go on from where they were. The answer
+    /// is built under the same lock take as the clear, so a dump that
+    /// arrives now is not in it: it is newer than the delete.
     pub fn clear(&self) -> DumpList {
-        lock(&self.shared.store).clear();
+        let snapshot = {
+            let mut store = lock(&self.shared.store);
+            store.clear();
+            DumpList {
+                status: self.status(),
+                latest_id: store.latest_id(),
+                count: store.count() as u64,
+                dumps: store.list(None),
+            }
+        };
+        // Told with the lock released: a dump that arrives after this
+        // sends its own notice.
         self.shared.changed.notify_one();
-        self.list(None)
+        snapshot
     }
 
     /// Starts the task that sends `DumpsChanged` on `events`, until
