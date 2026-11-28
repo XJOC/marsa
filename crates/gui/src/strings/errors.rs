@@ -523,6 +523,9 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
             "Marsa could not sign in to the server. It signs in as root with no password."
         }
         "db_unavailable" => "The database server did not answer as expected.",
+        "db_catalog_too_large" => {
+            "There are more than 10,000 databases or tables here, so Marsa does not list them."
+        }
         "db_timeout" => "The database took too long to answer.",
         "db_read_only" => "This statement changes data. This screen is read-only.",
         "db_one_statement" => "Run one statement at a time.",

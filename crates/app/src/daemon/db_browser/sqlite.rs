@@ -17,6 +17,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::http::StatusCode;
 use marsa_core::codes;
@@ -26,6 +27,7 @@ use marsa_core::types::{
     DbCellRequest, DbColumn, DbPage, DbRowsRequest, DbSiteFile, DbTable, DbTableInfo, DbTableRef,
     DbTables, DbTotal, DbValue, SiteList,
 };
+use sqlx::error::DatabaseError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection, Row};
 use tokio_stream::StreamExt;
@@ -139,6 +141,32 @@ pub(super) async fn open(file: &Path) -> Result<SqliteConnection, HttpError> {
         .map_err(|err| unavailable(err.to_string()))
 }
 
+/// Makes SQLite interrupt what runs on `connection` once `go_on` answers
+/// false: it is asked every 1,000 steps of SQLite's machine. Dropping the
+/// wait for a statement does not stop it, and the connection's close waits
+/// for it.
+pub(super) async fn interrupt_unless(
+    connection: &mut SqliteConnection,
+    go_on: impl FnMut() -> bool + Send + 'static,
+) -> Result<(), HttpError> {
+    connection
+        .lock_handle()
+        .await
+        .map_err(|err| unavailable(err.to_string()))?
+        .set_progress_handler(1000, go_on);
+    Ok(())
+}
+
+/// SQLite's primary result code of `err`: the low byte of the code the
+/// driver gives, which may be an extended one.
+pub(super) fn primary_code(err: &dyn DatabaseError) -> Option<i32> {
+    let code: i32 = err.code()?.parse().ok()?;
+    Some(code & 0xff)
+}
+
+/// SQLite's result code for a statement that was interrupted.
+const SQLITE_INTERRUPT: i32 = 9;
+
 /// Opens `file`, runs `work` on it, and closes it before the answer, so
 /// the file is free again at once, whatever `work` returned.
 async fn with_file<T>(
@@ -157,11 +185,9 @@ pub(super) async fn tables(file: PathBuf) -> Result<DbTables, HttpError> {
 }
 
 async fn read_tables(connection: &mut SqliteConnection) -> Result<DbTables, HttpError> {
-    let rows = sqlx::query(db_browser::tables_sql(Engine::Sqlite))
-        .fetch_all(connection)
-        .await
-        .map_err(|err| unavailable(err.to_string()))?;
-    catalog::tables(&rows)
+    let rows = sqlx::query(db_browser::tables_sql(Engine::Sqlite)).fetch(connection);
+    let tables = catalog::list(rows, |err| unavailable(err.to_string()), catalog::table).await?;
+    Ok(DbTables { tables })
 }
 
 /// The columns of `table`, after the catalog listed it, and its key.
@@ -232,25 +258,27 @@ pub(super) async fn page(file: PathBuf, request: DbRowsRequest) -> Result<DbPage
     .await
 }
 
-/// The exact number of rows, or `None` past [`COUNT_LIMIT`]. Last on the
-/// connection: SQLite cannot stop it, so the connection closes after it.
+/// The exact number of rows, or `None` past [`COUNT_LIMIT`], when SQLite
+/// interrupts the count. Last on the connection: the limit stays on it.
 async fn count(
     connection: &mut SqliteConnection,
     table: &DbTableRef,
 ) -> Result<Option<DbTotal>, HttpError> {
     let sql = db_browser::count_sql(Engine::Sqlite, table).map_err(rows::sql_error)?;
-    let counted = tokio::time::timeout(
-        COUNT_LIMIT,
-        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql)).fetch_one(connection),
-    )
-    .await;
+    let started = Instant::now();
+    interrupt_unless(connection, move || started.elapsed() < COUNT_LIMIT).await?;
+    let counted = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
+        .fetch_one(connection)
+        .await;
     match counted {
-        Err(_) => Ok(None),
-        Ok(Err(err)) => Err(unavailable(err.to_string())),
-        Ok(Ok(rows)) => Ok(Some(DbTotal {
+        Ok(rows) => Ok(Some(DbTotal {
             rows: u64::try_from(rows).unwrap_or(0),
             exact: true,
         })),
+        Err(err) if err.as_database_error().and_then(primary_code) == Some(SQLITE_INTERRUPT) => {
+            Ok(None)
+        }
+        Err(err) => Err(unavailable(err.to_string())),
     }
 }
 

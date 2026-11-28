@@ -28,7 +28,8 @@ impl DaemonClient {
     ///
     /// Any [`ClientError`]; `db_server_not_running` (409), `site_not_found`
     /// and `db_file_not_found` (404), `db_file_outside_site` (403),
-    /// `db_unavailable` (502), and `db_timeout` (504).
+    /// `db_catalog_too_large` and `db_unavailable` (502), and `db_timeout`
+    /// (504).
     pub async fn db_tables(&self, source: &DbSource) -> Result<DbTables, ClientError> {
         let body = DbTablesRequest {
             source: source.clone(),
