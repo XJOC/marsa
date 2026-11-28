@@ -17,6 +17,8 @@
 //! - [`root_certificates`]: the roots Windows trusts, for PHP's CA bundle.
 //! - [`is_elevated`] and [`process_is_elevated`]: whether a process runs
 //!   with an administrator's token, which `postgres.exe` refuses.
+//! - [`file_info`]: the volume, number, and names of an open file, for
+//!   `platform::files::identity`.
 //!
 //! The only `unsafe` code of `marsa-core` is in this module and its
 //! `helper_pipe` (AGENTS.md section 6). The blocks are short, and every
@@ -26,6 +28,7 @@ pub mod helper_pipe;
 
 mod detached;
 mod elevation;
+mod file_info;
 mod registry;
 mod roots;
 
@@ -33,6 +36,7 @@ pub(crate) use detached::{DetachedProcess, join_kill_on_close_job, spawn_detache
 pub use elevation::{
     Elevated, ElevatedProcess, current_user_sid, is_elevated, process_is_elevated, run_elevated,
 };
+pub(crate) use file_info::file_info;
 pub use registry::vc_runtime_version;
 pub use roots::{Roots, root_certificates};
 
