@@ -3,10 +3,11 @@
 //!
 //! The job's event says only what the rows are (`DbQueryDone`): every
 //! reader of the event stream gets it. The rows wait here for
-//! `GET /v1/db/results/{id}`, read once, for at most [`RESULT_KEEP`], and
-//! are dropped by `POST /v1/db/close`. A result is not paged: the first
-//! `RESULT_ROWS` rows or `RESULT_BYTES` of text, marked as cut; the
-//! connection then closes, so the server stops sending.
+//! `GET /v1/db/results/{id}`, read once, for at most [`RESULT_KEEP`], the
+//! newest [`KEPT_RESULTS`] only, and are dropped by `POST /v1/db/close`. A
+//! result is not paged: the first `RESULT_ROWS` rows or `RESULT_BYTES` of
+//! text, marked as cut; the connection then closes, so the server stops
+//! sending.
 //!
 //! The statement's text runs as the user wrote it: that is the feature. It
 //! is never logged, and nor is anything the database answers.
@@ -21,13 +22,14 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use marsa_core::codes;
 use marsa_core::db_browser::{self, Engine, column_kind};
 use marsa_core::types::{DbCell, DbPageColumn, DbQueryDone, DbResult, DbServer, DbSource};
 use sqlx::{Column, Connection, Row, TypeInfo};
+use tokio::time::Instant;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
@@ -39,12 +41,16 @@ use crate::daemon::state::Daemon;
 /// The longest a statement of the user's may run.
 pub(super) const QUERY_LIMIT: Duration = Duration::from_secs(5 * 60);
 /// How long the rows of a finished statement wait to be read.
-const RESULT_KEEP: Duration = Duration::from_secs(60);
+pub(super) const RESULT_KEEP: Duration = Duration::from_secs(60);
+/// How many finished results wait at once, so that statements no one reads
+/// cannot grow `marsad`: one for each source the browser keeps open.
+pub(super) const KEPT_RESULTS: usize = super::store::MAX_OPEN;
 
-/// What the browser keeps of the user's statements.
-#[derive(Default)]
+/// What the browser keeps of the user's statements. A clone is the same
+/// store.
+#[derive(Clone, Default)]
 pub(super) struct Queries {
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 #[derive(Default)]
@@ -90,14 +96,26 @@ impl Queries {
         self.lock().busy.retain(|busy| busy != source);
     }
 
-    /// Keeps the rows of job `id`, and drops the ones kept too long.
+    /// Keeps the rows of job `id` for [`RESULT_KEEP`], then drops them, even
+    /// if no other request ever comes. Past [`KEPT_RESULTS`], the oldest
+    /// rows go at once.
     pub(super) fn keep(&self, id: u64, result: DbResult) {
-        let mut inner = self.lock();
-        let now = Instant::now();
-        inner
-            .results
-            .retain(|_, (_, ended)| now.duration_since(*ended) < RESULT_KEEP);
-        inner.results.insert(id, (result, now));
+        {
+            let mut inner = self.lock();
+            inner.results.insert(id, (result, Instant::now()));
+            if inner.results.len() > KEPT_RESULTS {
+                let oldest = inner.results.iter().min_by_key(|(_, (_, ended))| *ended);
+                if let Some(oldest) = oldest.map(|(id, _)| *id) {
+                    inner.results.remove(&oldest);
+                }
+            }
+        }
+        // Job ids never repeat, so this removes these rows or nothing.
+        let queries = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RESULT_KEEP).await;
+            queries.lock().results.remove(&id);
+        });
     }
 
     /// The rows of job `id`, once.
@@ -106,11 +124,18 @@ impl Queries {
         (ended.elapsed() < RESULT_KEEP).then_some(result)
     }
 
+    #[cfg(test)]
+    pub(super) fn kept(&self) -> usize {
+        self.lock().results.len()
+    }
+
     pub(super) fn drop_results(&self) {
         self.lock().results.clear();
     }
 
-    fn start(&self, id: u64) -> CancellationToken {
+    /// The cancel of statement `id`. Made before its job is visible, so that
+    /// a cancel that comes before the statement starts is not lost.
+    pub(super) fn register(&self, id: u64) -> CancellationToken {
         let token = CancellationToken::new();
         self.lock().running.insert(id, (token.clone(), None));
         token
@@ -187,17 +212,25 @@ pub(super) fn one_statement(engine: Engine, sql: &str) -> Result<String, HttpErr
 }
 
 /// Runs `statement` on `target` as job `id` and reads its rows, within
-/// [`QUERY_LIMIT`], unless it is cancelled first.
+/// [`QUERY_LIMIT`], unless `cancel`, from [`Queries::register`], fires first.
 pub(super) async fn run(
     daemon: &Daemon,
     id: u64,
+    cancel: CancellationToken,
     target: Target,
     statement: String,
 ) -> Result<(DbResult, DbQueryDone), HttpError> {
     let started = Instant::now();
     let queries = &daemon.db_browser().queries;
-    let cancel = queries.start(id);
     let read = tokio::select! {
+        // The cancel first: a statement cancelled before it started opens
+        // nothing.
+        biased;
+        () = cancel.cancelled() => Err(HttpError::new(
+            StatusCode::CONFLICT,
+            codes::DB_QUERY_CANCELLED,
+            "the statement was cancelled",
+        )),
         read = tokio::time::timeout(QUERY_LIMIT, read(daemon, id, target, statement)) => {
             read.unwrap_or_else(|_| {
                 Err(HttpError::new(
@@ -207,11 +240,6 @@ pub(super) async fn run(
                 ))
             })
         }
-        () = cancel.cancelled() => Err(HttpError::new(
-            StatusCode::CONFLICT,
-            codes::DB_QUERY_CANCELLED,
-            "the statement was cancelled",
-        )),
     };
     let stop = queries.finish(id);
     if let (Err(err), Some(stop)) = (&read, stop)
@@ -302,9 +330,9 @@ async fn read(
     }
 }
 
-/// The rows of `stream`, cell by cell, until [`db_browser::RESULT_ROWS`]
-/// rows or [`db_browser::RESULT_BYTES`] of text: then `cut`, and the rest
-/// is never read.
+/// The rows of `stream`, cell by cell: at most [`db_browser::RESULT_ROWS`]
+/// rows and [`db_browser::RESULT_BYTES`] of text. A row that would pass
+/// either is left out and the result is `cut`; the rest is never read.
 async fn collect<R, S>(
     engine: Engine,
     mut stream: S,
@@ -319,7 +347,7 @@ where
     let mut bytes = 0usize;
     while let Some(row) = stream.next().await {
         let row = row.map_err(query_error)?;
-        if found.len() == db_browser::RESULT_ROWS || bytes > db_browser::RESULT_BYTES {
+        if found.len() == db_browser::RESULT_ROWS {
             return Ok((columns, found, true));
         }
         if columns.is_empty() {
@@ -336,6 +364,9 @@ where
             .map(|index| cell(&row, index, db_browser::VALUE_BYTES))
             .collect::<Result<Vec<_>, _>>()?;
         bytes += cells.iter().map(weight).sum::<usize>();
+        if bytes > db_browser::RESULT_BYTES {
+            return Ok((columns, found, true));
+        }
         found.push(cells);
     }
     Ok((columns, found, false))
