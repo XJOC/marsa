@@ -321,6 +321,7 @@ pub(super) fn owner(kind: ServerKind, data_dir: &Path, port: u16) -> Owner<'stat
         pid_file: pid_path(kind, data_dir),
         port: Some(port),
         recovery: process::DATABASE_ORPHAN_RECOVERY,
+        group: false,
     }
 }
 
