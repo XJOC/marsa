@@ -2,6 +2,7 @@
 
 use super::installs::failure;
 use super::*;
+use crate::bridge::Stamped;
 use crate::fixtures::connected;
 use crate::strings::INSTALL_INTERRUPTED;
 use marsa_core::php::PhpMinor;
@@ -288,6 +289,25 @@ fn the_sites_search_is_the_models_and_a_reconnect_keeps_it() {
         model.sites_search, "sh",
         "the user's typing, not daemon state"
     );
+}
+
+#[test]
+fn an_update_of_another_session_is_dropped() {
+    let mut model = Model::default();
+    let from = |session, body| Stamped { session, body };
+    let notice = |model: &Model| model.session.notices.code(NoticeSource::Call).is_some();
+    model.receive(from(1, Update::Connected(health())));
+    model.receive(from(1, Update::Reconnecting));
+    model.receive(from(2, Update::Connected(health())));
+    assert_eq!(model.session.number, 2);
+    // A late answer of the lost session.
+    model.receive(from(1, Update::Notice("not_found".into())));
+    assert!(!notice(&model));
+    model.receive(from(2, Update::Notice("not_found".into())));
+    assert!(notice(&model));
+    // An attempt that never connects still says why.
+    model.receive(from(3, Update::Failed("daemon_not_running".into())));
+    assert!(matches!(model.session.connection, Connection::Failed(_)));
 }
 
 #[test]

@@ -184,6 +184,7 @@ mod tests {
     use marsa_core::types::MailSummary;
 
     use super::*;
+    use crate::bridge::Stamped;
 
     fn list(ids: &[&str]) -> MailList {
         let mail = |id: &&str| MailSummary {
@@ -210,9 +211,10 @@ mod tests {
         let window = Window {
             updates,
             repaint: Arc::new(OnceLock::new()),
+            session: 0,
         };
         let mut feed = Feed::default();
-        let sent = |received: &mpsc::Receiver<Update>| received.try_iter().count();
+        let sent = |received: &mpsc::Receiver<Stamped<Update>>| received.try_iter().count();
         assert!(feed.answer(&window, Ok(list(&["a1"]))));
         assert_eq!(sent(&received), 1);
         // Every 10 s the same list: no update, so no frame.
@@ -227,7 +229,7 @@ mod tests {
         assert!(feed.answer(&window, stopped()));
         assert_eq!(sent(&received), 1);
         assert!(feed.answer(&window, Ok(list(&["b2", "a1"]))));
-        let update = received.try_recv().expect("the list again");
+        let update = received.try_recv().expect("the list again").body;
         assert!(matches!(update, Update::Mail(ref list) if list.messages.len() == 2));
         // The window is gone.
         drop(received);

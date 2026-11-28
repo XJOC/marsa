@@ -142,6 +142,7 @@ mod tests {
     use marsa_core::types::Dump;
 
     use super::*;
+    use crate::bridge::Stamped;
 
     fn dump(id: u64) -> Dump {
         Dump {
@@ -172,9 +173,10 @@ mod tests {
         let window = Window {
             updates,
             repaint: Arc::new(OnceLock::new()),
+            session: 0,
         };
         let mut feed = Feed::default();
-        let sent = |received: &mpsc::Receiver<Update>| received.try_iter().count();
+        let sent = |received: &mpsc::Receiver<Stamped<Update>>| received.try_iter().count();
         let listening = DumpsStatus::Listening;
         // The first read is whole.
         assert!(feed.answer(&window, list(&[2, 1], 2, listening), true));

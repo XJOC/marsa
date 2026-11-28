@@ -55,7 +55,7 @@ pub use setup::{FIRST_PHP, FirstRun, HostsSync, Setup, first_run_needed};
 use sites::SITE_IS_PARKED;
 pub use sites::{LinkForm, Pick, SitesNotice, folder_path, url};
 
-use crate::bridge::Command;
+use crate::bridge::{Command, Stamped};
 pub use crate::logline::{HiddenLevels, LogLevel};
 pub use crate::prefs::Appearance;
 use crate::strings::{self, ReportLine};
@@ -179,6 +179,22 @@ impl Model {
         Self {
             data_dir,
             ..Self::default()
+        }
+    }
+
+    /// An update as the bridge sends it. One of a session other than the
+    /// connected one is dropped.
+    pub fn receive(&mut self, update: Stamped<Update>) {
+        let Stamped { session, body } = update;
+        match body {
+            Update::Connected(_) => {
+                self.update(body);
+                self.session.number = session;
+            }
+            // About the connection itself, whichever session says it.
+            Update::Reconnecting | Update::Failed(_) => self.update(body),
+            body if session == self.session.number => self.update(body),
+            _ => tracing::debug!(session, "an update of another session is dropped"),
         }
     }
 
