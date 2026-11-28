@@ -7,6 +7,7 @@ use marsa_core::types::{
     DbCellRequest, DbKeyDetail, DbKeyRequest, DbKeys, DbKeysRequest, DbPage, DbQueryRequest,
     DbResult, DbRowsRequest, DbSource, DbSources, DbTable, DbTableRef, DbTables, DbValue,
 };
+use tokio::runtime::Handle;
 
 use crate::model::Update;
 
@@ -87,6 +88,47 @@ pub enum DbUpdate {
     },
 }
 
+/// A statement whose end is awaited. Dropped before that (its session
+/// ended), its job is cancelled: nobody would read the rows, and the source
+/// stays busy until it ends. The session's own client asks, so only the
+/// daemon that runs the job can hear it.
+struct Awaited {
+    client: DaemonClient,
+    job: Option<u64>,
+}
+
+impl Awaited {
+    fn new(client: &DaemonClient, job: u64) -> Self {
+        Self {
+            client: client.clone(),
+            job: Some(job),
+        }
+    }
+
+    fn ended(&mut self) {
+        self.job = None;
+    }
+}
+
+impl Drop for Awaited {
+    fn drop(&mut self) {
+        let Some(job) = self.job.take() else {
+            return;
+        };
+        // None while the bridge's runtime goes: the window's close then
+        // cancels the statement.
+        let Ok(runtime) = Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(async move {
+            if let Err(err) = client.cancel_job(job).await {
+                tracing::debug!(code = err.code(), "the statement was not cancelled");
+            }
+        });
+    }
+}
+
 /// Runs `command`, and the update it gives, if any. A statement sends its
 /// start through `window` first.
 pub(super) async fn run(
@@ -140,7 +182,9 @@ pub(super) async fn run(
                 id,
                 result: Ok(job),
             }));
+            let mut awaited = Awaited::new(client, job);
             let result = client.db_query_result(job).await.map_err(failed);
+            awaited.ended();
             Some(Update::Db(DbUpdate::Query { id, result }))
         }
         DbCommand::CancelQuery { job } => {

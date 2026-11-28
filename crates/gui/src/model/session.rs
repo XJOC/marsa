@@ -78,6 +78,9 @@ impl Overall {
 /// is forgotten on reconnect without a list to keep in step.
 #[derive(Debug, Default)]
 pub struct Session {
+    /// The bridge's number of this session; 0 before the first one. The
+    /// window's commands carry it.
+    pub number: u64,
     pub connection: Connection,
     /// The last result of each place that tells the user about one.
     pub notices: Notices,

@@ -280,7 +280,7 @@ impl PanelApp {
                     // The panel has no folder dialog and opens no folder: only
                     // a command matters here.
                     if let Some(command) = self.model.apply_action(action).command() {
-                        self.bridge.send(command);
+                        self.bridge.send(self.model.session.number, command);
                     }
                 }
             }
