@@ -402,7 +402,7 @@ mod tests {
         let (temp, php) = data();
         recorded(temp.path(), &php);
         let fake = Fake::says(vec![alive(&php, 7), alive(&php, 7)], Liveness::Gone)
-            .with_groups(vec![true, true], Liveness::Gone);
+            .with_groups(vec![true], Liveness::Gone);
         assert!(matches!(run(&fake, temp.path()).await, Before::Note(_)));
         assert_eq!(fake.group_signals(), [(PID, Signal::Term)]);
         assert!(fake.signals().is_empty());
