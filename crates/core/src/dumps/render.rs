@@ -40,6 +40,25 @@ pub(super) struct Rendered {
     pub truncated: bool,
 }
 
+/// The rows by their position, built once per render: one item's lookup
+/// is a map hit, not a scan of the whole list. The first row of a
+/// position wins, as the scan it replaces chose it.
+struct RowIndex {
+    places: HashMap<i64, usize>,
+}
+
+impl RowIndex {
+    fn new(rows: &[(Key, Id)]) -> Self {
+        let mut places = HashMap::with_capacity(rows.len());
+        for (place, (key, _)) in rows.iter().enumerate() {
+            if let Key::Int(position) = key {
+                places.entry(*position).or_insert(place);
+            }
+        }
+        Self { places }
+    }
+}
+
 /// The text of the item at row `position`, key `key`, of `rows`.
 pub(super) fn render(
     tree: &Tree,
@@ -50,6 +69,7 @@ pub(super) fn render(
     let mut writer = Writer {
         tree,
         rows,
+        index: RowIndex::new(rows),
         out: String::new(),
         lines: 0,
         stopped: false,
@@ -108,6 +128,8 @@ struct HashInfo {
 struct Writer<'a> {
     tree: &'a Tree,
     rows: &'a [(Key, Id)],
+    /// The rows by position, so [`Writer::row`] does not scan `rows`.
+    index: RowIndex,
     out: String,
     lines: usize,
     stopped: bool,
@@ -120,7 +142,7 @@ struct Writer<'a> {
 
 impl<'a> Writer<'a> {
     fn row(&self, position: i64) -> Option<&'a [(Key, Id)]> {
-        let (_, id) = self.rows.iter().find(|(k, _)| *k == Key::Int(position))?;
+        let (_, id) = self.rows.get(*self.index.places.get(&position)?)?;
         match self.tree.get(*id) {
             Node::Array(entries) => Some(entries),
             _ => None,
