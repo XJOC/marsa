@@ -30,7 +30,7 @@ pub use identity::{ParentProcess, children, executable, identity, parent_process
 pub use listeners::{adopters, listener_holders, port_lookup, port_owner, udp_port_owner};
 pub use login::{LoginTimes, login_session_start, login_times, read_login_times};
 pub use pid_files::{instance_id, read_pid_file, read_small_file, remove_pid_file, write_pid_file};
-pub use signals::send_signal;
+pub use signals::{group_exists, own_group, send_signal, signal_group};
 
 /// Whether the daemon writes `run/caddy.pid` after each start of Caddy, and
 /// looks for an orphan Caddy before it starts one: macOS (ADR 0009) and

@@ -58,6 +58,7 @@ pub(super) fn spec(
         cwd: None,
         restart: RestartPolicy::Never,
         stop: valkey_stop(port),
+        own_group: false,
     })
 }
 

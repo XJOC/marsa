@@ -53,6 +53,7 @@ pub(super) fn spec(program: PathBuf, dirs: &MysqlDirs, os: Os, stop: StopMethod)
         cwd: None,
         restart: RestartPolicy::Never,
         stop,
+        own_group: false,
     }
 }
 

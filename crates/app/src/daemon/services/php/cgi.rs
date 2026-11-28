@@ -64,6 +64,7 @@ pub fn pool_with(files: PhpFiles) -> Result<Pool, Skip> {
         // replaced by php-cgi itself; only the end of php-cgi counts here.
         restart: RESTART,
         stop: StopMethod::term(STOP_GRACE),
+        own_group: false,
     };
     Ok(Pool {
         files,
