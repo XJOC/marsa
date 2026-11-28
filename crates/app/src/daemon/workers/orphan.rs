@@ -395,22 +395,62 @@ mod tests {
         assert!(fake.signals().is_empty());
     }
 
-    /// What is left of the group once the worker is gone gets the signals
-    /// too, while no process has the group's id as its pid.
+    /// What is left of the group gets the worker's grace for the signal it
+    /// got with it, and nothing more when it ends within it.
     #[tokio::test]
-    async fn the_rest_of_the_group_is_stopped_after_the_worker() {
+    async fn the_rest_of_the_group_gets_the_workers_grace() {
         let (temp, php) = data();
         recorded(temp.path(), &php);
-        // The group still has a process after the worker (one look before
-        // the SIGTERM, one after it), then none.
         let fake = Fake::says(vec![alive(&php, 7), alive(&php, 7)], Liveness::Gone)
             .with_groups(vec![true, true], Liveness::Gone);
         assert!(matches!(run(&fake, temp.path()).await, Before::Note(_)));
+        assert_eq!(fake.group_signals(), [(PID, Signal::Term)]);
+        assert!(fake.signals().is_empty());
+        assert!(!pid_path(temp.path(), queue()).exists());
+    }
+
+    /// A part of the group that outlives the grace (a task that traps
+    /// SIGTERM) gets SIGKILL, not the ladder again.
+    #[tokio::test]
+    async fn the_rest_of_the_group_that_outlives_the_grace_gets_sigkill() {
+        let (temp, php) = data();
+        recorded(temp.path(), &php);
+        let fake = Fake::says(vec![alive(&php, 7), alive(&php, 7)], Liveness::Gone)
+            .with_groups(vec![true; 20], Liveness::Gone);
+        assert!(matches!(run(&fake, temp.path()).await, Before::Note(_)));
         assert_eq!(
             fake.group_signals(),
-            [(PID, Signal::Term), (PID, Signal::Term)]
+            [(PID, Signal::Term), (PID, Signal::Kill)]
         );
-        assert!(!pid_path(temp.path(), queue()).exists());
+        assert!(fake.signals().is_empty());
+    }
+
+    /// The worker ended before any signal, at the check right before it:
+    /// what is left of its group gets the whole ladder.
+    #[tokio::test]
+    async fn the_rest_of_a_group_whose_worker_ended_first_gets_the_ladder() {
+        let (temp, php) = data();
+        recorded(temp.path(), &php);
+        let fake = Fake::says(vec![alive(&php, 7)], Liveness::Gone)
+            .with_groups(vec![true, true], Liveness::Gone);
+        assert!(matches!(run(&fake, temp.path()).await, Before::Note(_)));
+        assert_eq!(fake.group_signals(), [(PID, Signal::Term)]);
+        assert!(fake.signals().is_empty());
+    }
+
+    /// A record whose worker ended by itself before this start proves
+    /// nothing about a group with that id: no signal at all.
+    #[tokio::test]
+    async fn a_stale_record_signals_no_group() {
+        for now in [Liveness::Gone, alive(Path::new("/usr/bin/vim"), 7)] {
+            let (temp, php) = data();
+            recorded(temp.path(), &php);
+            let fake =
+                Fake::says(Vec::new(), now.clone()).with_groups(vec![true; 20], Liveness::Gone);
+            assert_eq!(run(&fake, temp.path()).await, Before::Clear, "{now:?}");
+            assert!(fake.group_signals().is_empty(), "{now:?}");
+            assert!(fake.signals().is_empty(), "{now:?}");
+        }
     }
 
     /// A process has the group's id as its pid again, or the system cannot

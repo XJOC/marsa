@@ -162,8 +162,9 @@ pub(crate) async fn clear(
     let signals = signal_steps(ladder)
         .into_iter()
         .chain([(Signal::Kill, KILL_WAIT)]);
-    // The last signal sent, for the line that says how it stopped.
-    let mut sent = None;
+    // The last signal sent, for the line that says how it stopped, and the
+    // end of its wait, which the rest of a group gets too.
+    let mut last: Option<(Signal, Instant)> = None;
     for (signal, wait) in signals {
         match check(probes, &record, servers).await {
             PidfileState::Ours { .. } => {}
@@ -177,7 +178,7 @@ pub(crate) async fn clear(
                 return Err(Stuck(reason));
             }
             // Gone, or someone else's now: it ended between two checks.
-            _ => return Ok(ended(owner, probes, pid, sent, ladder).await),
+            _ => return Ok(ended(owner, probes, pid, last, ladder).await),
         }
         warn!(
             pid,
@@ -188,9 +189,9 @@ pub(crate) async fn clear(
         if let Err(err) = send(owner, probes, pid, signal).await {
             warn!(pid, signal = signal.name(), %err, "the signal failed");
         }
-        sent = Some(signal);
+        last = Some((signal, Instant::now() + wait));
         if gone(probes, &record, servers, wait).await {
-            return Ok(ended(owner, probes, pid, sent, ladder).await);
+            return Ok(ended(owner, probes, pid, last, ladder).await);
         }
     }
     let reason = format!(
@@ -220,38 +221,63 @@ async fn send(
 }
 
 /// After our old process `pid` ended: the rest of its group, if it led one
-/// ([`end_group`]), then [`done`].
+/// ([`end_group`]), then [`done`]. `last` is the last signal it got and the
+/// end of that signal's wait.
 async fn ended(
     owner: &Owner<'_>,
     probes: &dyn ProcessProbe,
     pid: u32,
-    sent: Option<Signal>,
+    last: Option<(Signal, Instant)>,
     ladder: &StopMethod,
 ) -> Cleared {
     if owner.group {
-        end_group(owner, probes, pid, ladder).await;
+        end_group(owner, probes, pid, ladder, last).await;
     }
-    done(owner, pid, sent).await
+    done(owner, pid, last.map(|(signal, _)| signal)).await
 }
 
 /// Stops what is left of the group `pgid` that our old process led, now
-/// that it is gone: the signals of `ladder`, then SIGKILL, each while the
-/// group has a process and no process has the pid `pgid`. The group was
-/// ours a moment ago, and the system gives no new process a pid that is
-/// still a group's id, so such a group is still ours. Anything else gets
-/// no signal. Nothing here keeps the start: these processes take no jobs
-/// of their own.
-async fn end_group(owner: &Owner<'_>, probes: &dyn ProcessProbe, pgid: u32, ladder: &StopMethod) {
-    let signals = signal_steps(ladder)
-        .into_iter()
-        .chain([(Signal::Kill, KILL_WAIT)]);
-    for (signal, wait) in signals {
+/// that it is gone. The group got the process's `last` signal with it, so
+/// it gets the rest of that signal's wait, then the steps of `ladder` after
+/// that one; with no `last`, the whole `ladder`. SIGKILL ends it.
+///
+/// Each signal goes out only while the group has a process and no process
+/// has the pid `pgid` ([`pgid_free`]): the group was ours a moment ago, and
+/// the system gives no new process a pid that is still a group's id. Our
+/// group could end, and its id go to a new group whose leader already
+/// exited, between that look and the signal: that needs every pid handed
+/// out again within milliseconds, the window ADR 0009 accepts for a pid.
+///
+/// The worker's start waits for this, once, after a crash: at most the
+/// ladder and its SIGKILL. What is left is logged, and does not keep the
+/// start: it takes no jobs of its own.
+async fn end_group(
+    owner: &Owner<'_>,
+    probes: &dyn ProcessProbe,
+    pgid: u32,
+    ladder: &StopMethod,
+    last: Option<(Signal, Instant)>,
+) {
+    let steps = signal_steps(ladder);
+    let rest = match last {
+        Some((signal, until)) => {
+            if group_ended_by(probes, pgid, until).await {
+                return;
+            }
+            let after = steps
+                .iter()
+                .position(|(step, _)| *step == signal)
+                .map_or(steps.len(), |at| at + 1);
+            steps[after..].to_vec()
+        }
+        None => steps,
+    };
+    for (signal, wait) in rest.into_iter().chain([(Signal::Kill, KILL_WAIT)]) {
         if !probes.group_exists(pgid).await {
             return;
         }
-        let now = probes.identity(pgid).await;
-        if now != Liveness::Gone {
-            warn!(pgid, ?now, service = %owner.id, "the old group may not be ours now; no signal");
+        if !pgid_free(probes, pgid).await {
+            warn!(pgid, service = %owner.id, "the old group may not be ours now; no signal");
             return;
         }
         warn!(
@@ -263,16 +289,40 @@ async fn end_group(owner: &Owner<'_>, probes: &dyn ProcessProbe, pgid: u32, ladd
         if let Err(err) = probes.signal_group(pgid, signal).await {
             warn!(pgid, signal = signal.name(), %err, "the group signal failed");
         }
-        let started = Instant::now();
-        while probes.group_exists(pgid).await {
-            if started.elapsed() >= wait {
-                break;
-            }
-            tokio::time::sleep(POLL).await;
+        if group_ended_by(probes, pgid, Instant::now() + wait).await {
+            return;
         }
     }
-    if probes.group_exists(pgid).await {
-        warn!(pgid, service = %owner.id, "the rest of our old group still runs after SIGKILL");
+    warn!(pgid, service = %owner.id, "the rest of our old group still runs after SIGKILL");
+}
+
+/// Whether no process has the pid `pgid`: up to [`STOP_LOOKS`] looks, as
+/// for the pid record, when the system cannot tell. Anything else, or no
+/// answer, is `false`.
+async fn pgid_free(probes: &dyn ProcessProbe, pgid: u32) -> bool {
+    for look in 0..STOP_LOOKS {
+        if look > 0 {
+            tokio::time::sleep(LOOK_AGAIN).await;
+        }
+        match probes.identity(pgid).await {
+            Liveness::Gone => return true,
+            Liveness::Unknown => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Whether the group `pgid` has no process left by `until`.
+async fn group_ended_by(probes: &dyn ProcessProbe, pgid: u32, until: Instant) -> bool {
+    loop {
+        if !probes.group_exists(pgid).await {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        tokio::time::sleep(POLL).await;
     }
 }
 
@@ -425,6 +475,7 @@ mod tests {
             .read_line(&mut line)
             .unwrap();
         let member: u32 = line.trim().parse().unwrap();
+        let _cleanup = KillOnPanic([pid, member]);
         // Collected at its end, so it is gone, not a zombie of this test.
         std::thread::spawn(move || leader.wait());
         let (exe, started) = tokio::time::timeout(Duration::from_secs(10), async {
@@ -461,12 +512,27 @@ mod tests {
             }
         };
         let gone = tokio::time::timeout(Duration::from_secs(10), gone).await;
-        if gone.is_err() {
-            let _ = std::process::Command::new("/bin/kill")
-                .args(["-KILL", &member.to_string()])
-                .status();
-            panic!("the other process of the group still runs");
-        }
+        assert!(gone.is_ok(), "the other process of the group still runs");
         assert!(!process::group_exists(pid).await);
+    }
+
+    /// Kills the test's processes when it fails. Nothing after a test that
+    /// passed: the pids may be someone else's by then.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    struct KillOnPanic([u32; 2]);
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    impl Drop for KillOnPanic {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                return;
+            }
+            for pid in self.0 {
+                let _ = std::process::Command::new("/bin/kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
     }
 }
