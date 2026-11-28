@@ -174,6 +174,76 @@ step "the commands Laravel's cache and queue use"
 [ "$(cli eval "return redis.call('GET', KEYS[1])" 1 marsa-e2e)" = kept ] || fail "EVAL"
 [ "$(cli rpush marsa-e2e-queue job)" = 1 ] || fail "RPUSH"
 
+step "marsa db keys: the browser reads the keys, and only reads them"
+[ "$(cli -n 1 set laravel_cache_total 412 ex 600)" = OK ] || fail "SET in database 1"
+cli hset marsa-e2e-cart sku 14 qty 2 >/dev/null
+cli zadd marsa-e2e-top 12.5 omar >/dev/null
+cli sadd marsa-e2e-ids 12 >/dev/null
+cli xadd marsa-e2e-log '*' k v >/dev/null
+# A string of 200,000 bytes, a list of 900 items, a value that is not text,
+# and 3,000 keys for more than one page.
+cli eval "redis.call('SET', 'marsa-e2e-long', string.rep('v', 200000)) \
+  for i = 1, 900 do redis.call('RPUSH', 'marsa-e2e-jobs', 'job ' .. i) end \
+  redis.call('SET', 'marsa-e2e-binary', string.char(255, 0, 254)) \
+  for i = 1, 3000 do redis.call('SET', 'page:' .. i, i) end" 0 >/dev/null
+KEYS_BEFORE=$(cli dbsize)
+# $1: what the output must have; the rest: the arguments of `marsa db`.
+shows() {
+  local text=$1
+  shift
+  local out
+  out=$(marsa db "$@") || fail "marsa db $* failed: $out"
+  grep -qF -- "$text" <<<"$out" || fail "marsa db $*: no \"$text\" in: $(head -c 600 <<<"$out")"
+}
+shows "valkey/1"
+shows "laravel_cache_total" keys valkey/1
+shows "1 key in valkey/1." keys valkey/1
+shows "string, expires in " key valkey/1 laravel_cache_total
+shows "412" key valkey/1 laravel_cache_total
+shows "marsa-e2e-cart" keys valkey/0 --match 'marsa-e2e-c*'
+shows "marsa-e2e-top" keys --type zset
+marsa db keys --type zset | grep -qF marsa-e2e-cart && fail "--type zset listed a hash"
+shows "hash, no expiry, 2 fields" key valkey/0 marsa-e2e-cart
+shows "sku" key valkey/0 marsa-e2e-cart
+shows "zset, no expiry, 1 member" key valkey/0 marsa-e2e-top
+shows "12.5" key valkey/0 marsa-e2e-top
+shows "set, no expiry, 1 member" key valkey/0 marsa-e2e-ids
+shows "Marsa does not show values of this type." key valkey/0 marsa-e2e-log
+shows "Marsa shows the first 65.5 KB of 200.0 KB." key valkey/0 marsa-e2e-long
+shows "list, no expiry, 900 items" key valkey/0 marsa-e2e-jobs
+shows "Marsa shows the first 500 of 900." key valkey/0 marsa-e2e-jobs
+shows "job 500" key valkey/0 marsa-e2e-jobs
+marsa db key valkey/0 marsa-e2e-jobs | grep -qF "job 501" && fail "more than 500 items"
+shows "(binary, 3 B)" key valkey/0 marsa-e2e-binary
+
+# Every one of the 3,000 keys, page by page.
+cursor=0
+pages=0
+: >"$RUNNER_TEMP/pages.txt"
+while :; do
+  out=$(marsa db keys valkey/0 --match 'page:*' --cursor "$cursor")
+  grep '^page:' <<<"$out" >>"$RUNNER_TEMP/pages.txt" || true
+  pages=$((pages + 1))
+  cursor=$(sed -n 's/^More keys: .* --cursor \([0-9]*\)$/\1/p' <<<"$out")
+  [ -n "$cursor" ] || break
+  [ "$pages" -lt 100 ] || fail "the pages do not end"
+done
+found=$(sort -u "$RUNNER_TEMP/pages.txt" | wc -l | tr -d ' ')
+echo "$found keys in $pages pages"
+[ "$found" = 3000 ] || fail "the pages gave $found of 3000 keys"
+[ "$pages" -gt 1 ] || fail "3000 keys came as one page"
+
+# A pattern or a name is one argument: a command written in it is not run.
+HOSTILE=$'x \r\n*1\r\n$8\r\nFLUSHALL\r\n'
+shows "No keys found." keys valkey/0 --match "$HOSTILE"
+refused 'db_key_not_found' marsa db key valkey/0 "$HOSTILE"
+refused 'db_source_invalid' marsa db keys valkey/16
+[ "$(cli dbsize)" = "$KEYS_BEFORE" ] || fail "the number of keys changed"
+refused 'db_key_not_found' marsa db key valkey/0 marsa-e2e-no-such-key
+for secret in marsa-e2e-cart laravel_cache_total FLUSHALL; do
+  grep -qF "$secret" "$DATA/logs/marsad.log" && fail "marsad's log holds $secret"
+done
+
 step "phpredis (the redis extension of our PHP)"
 run marsa install php 8.4
 PHP=$(ls -d "$DATA"/runtimes/php/8.4.*/bin/php | tail -n 1)
@@ -206,6 +276,8 @@ grep -q 'DB saved on disk' "$DATA/logs/valkey.log" || fail "no 'DB saved on disk
 grep -q 'still running after SHUTDOWN SAVE' "$DATA/logs/marsad.log" && fail "SHUTDOWN SAVE did not stop it"
 grep -q 'enabled = true' "$DATA/config/global.toml" && fail "the stop did not turn it off"
 [ -e "$DATA/run/valkey.pid" ] && fail "the pid record stayed"
+
+refused 'db_server_not_running' marsa db keys valkey/0
 
 step "the next start finds the data"
 run marsa services start valkey

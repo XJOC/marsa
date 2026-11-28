@@ -385,7 +385,7 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
              \"marsa services start {id}\", then try again."
         ),
         "db_source_invalid" => "That source, table, or column cannot be used. Write a source \
-             as mysql/<database>, postgres/<database>, or site/<site>."
+             as mysql/<database>, postgres/<database>, site/<site>, or valkey/<0 to 15>."
             .into(),
         "db_not_found" => "The server has no database by that name. Run \"marsa db\" to see \
              the databases."
@@ -401,6 +401,9 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
             "The SQLite file of the site {site} is not a regular file inside the site's \
              folder, so Marsa does not open it."
         ),
+        "db_sign_in_failed" if id == "valkey" => "Valkey asked for a password. \
+             Marsa connects with none, so \"marsa db\" cannot read it."
+            .into(),
         "db_sign_in_failed" => format!(
             "{service_first} refused Marsa's sign-in as root with no password. If you set a \
              password for root, \"marsa db\" cannot open this server yet."
