@@ -142,6 +142,8 @@ pub(super) fn run_command(
             Command::ReadDumps | Command::ClearDumps | Command::SetDumpsCapture(_) => None,
             // The session's site log reader runs these.
             Command::FollowSiteLog(_) | Command::StopSiteLog => None,
+            // The session ends itself.
+            Command::Quit(_) => None,
             Command::SetXdebug(enabled) => Some(match client.set_xdebug(enabled).await {
                 Ok(state) => {
                     tracing::info!(enabled, "Xdebug changed");

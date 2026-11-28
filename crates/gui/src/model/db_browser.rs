@@ -239,6 +239,14 @@ impl Model {
                 .any(|site| site.kind == marsa_core::types::SiteKind::Laravel)
     }
 
+    /// Whether the daemon may hold database connections, or run a statement,
+    /// for this window: the screen is open, or was just left and its close
+    /// has not gone.
+    pub fn holds_databases(&self) -> bool {
+        let leaving = self.session.db.pending == Some(DbCommand::Close);
+        self.is_connected() && (self.route == Route::Databases || leaving)
+    }
+
     /// The Databases screen opened: read what can be opened.
     pub(super) fn open_databases(&mut self) -> Option<Command> {
         if !self.is_connected() {
