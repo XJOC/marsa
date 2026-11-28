@@ -8,7 +8,7 @@
 //! Like Mail it fills the height and scrolls inside, and it draws only what
 //! is in view: the rows of the list (`ScrollArea::show_rows`) and the lines
 //! of the text (the same, over the lines of one dump, which may have 20 000).
-//! The lines are found once for each dump, not on every frame.
+//! The lines are found once for each text, not on every frame.
 //!
 //! Like the other screens it is two functions. [`view`] reads the [`Model`]
 //! and decides what the screen says: pure, so the tests assert it without a
@@ -262,6 +262,10 @@ pub(crate) fn show(ui: &mut Ui, view: &DumpsView<'_>, theme: &Theme) -> Vec<Acti
         }
         Body::List(listed) => split(ui, theme, listed, &mut actions),
     }
+    if !matches!(view.body, Body::List(_)) {
+        // No dump is shown: the copy of the last one's text goes.
+        ui.data_mut(|data| data.remove::<Lines>(lines_key()));
+    }
     actions
 }
 
@@ -407,18 +411,24 @@ fn facts(ui: &mut Ui, theme: &Theme, dump: &Detail<'_>) {
 /// Where each line of a dump's text starts and ends, kept between frames.
 #[derive(Clone)]
 struct Lines {
-    id: u64,
-    len: usize,
+    /// The text the ranges cut. An id and a length do not name a text: a new
+    /// daemon counts from 1 again, and egui's memory outlives it.
+    text: Arc<str>,
     ranges: Arc<[(u32, u32)]>,
 }
 
-/// The lines of `dump`'s text: found once for each dump, not on every
-/// frame (rules.md 10).
+fn lines_key() -> Id {
+    Id::unique("dump_lines")
+}
+
+/// The lines of `dump`'s text: found once for each text, not on every
+/// frame (rules.md 10). A frame only compares the two texts, at most
+/// 256 KiB.
 fn lines_of(ui: &Ui, dump: &Detail<'_>) -> Arc<[(u32, u32)]> {
-    let key = Id::unique("dump_lines");
+    let key = lines_key();
     let kept = ui
         .data(|data| data.get_temp::<Lines>(key))
-        .filter(|lines| lines.id == dump.id && lines.len == dump.text.len());
+        .filter(|lines| *lines.text == *dump.text);
     if let Some(lines) = kept {
         return lines.ranges;
     }
@@ -435,8 +445,7 @@ fn lines_of(ui: &Ui, dump: &Detail<'_>) -> Arc<[(u32, u32)]> {
     }
     let ranges: Arc<[(u32, u32)]> = ranges.into();
     let lines = Lines {
-        id: dump.id,
-        len: dump.text.len(),
+        text: dump.text.into(),
         ranges: Arc::clone(&ranges),
     };
     ui.data_mut(|data| data.insert_temp(key, lines));
@@ -773,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn the_lines_of_a_text_are_found_once_for_each_dump() {
+    fn the_lines_of_a_text_are_found_once_for_each_text() {
         let model = with(vec![dump(1, 0, "a\nb\nc")], DumpsStatus::Listening);
         let harness = Harness::new(egui::Theme::Light);
         let mut first: Option<Arc<[(u32, u32)]>> = None;
@@ -783,22 +792,54 @@ mod tests {
             });
             let kept = harness
                 .ctx
-                .data(|data| data.get_temp::<Lines>(Id::unique("dump_lines")))
+                .data(|data| data.get_temp::<Lines>(lines_key()))
                 .expect("lines kept");
             assert_eq!(&*kept.ranges, &[(0, 1), (2, 3), (4, 5)]);
             let ranges = first.get_or_insert_with(|| Arc::clone(&kept.ranges));
             assert!(Arc::ptr_eq(ranges, &kept.ranges), "found again");
         }
-        // Another dump: new lines.
+        // Another text: new lines.
         let other = with(vec![dump(2, 0, "x\ny")], DumpsStatus::Listening);
         harness.frame(input(), |ui| {
             draw(ui, &other);
         });
         let kept = harness
             .ctx
-            .data(|data| data.get_temp::<Lines>(Id::unique("dump_lines")))
+            .data(|data| data.get_temp::<Lines>(lines_key()))
             .expect("lines kept");
         assert_eq!(&*kept.ranges, &[(0, 1), (2, 3)]);
+    }
+
+    /// A new daemon counts its dumps from 1 again, and egui's memory
+    /// outlives the model: the same id and length may be another text.
+    #[test]
+    fn the_same_id_and_length_with_another_text_finds_the_lines_again() {
+        let harness = Harness::new(egui::Theme::Light);
+        let old = with(vec![dump(1, 0, "a\nbc")], DumpsStatus::Listening);
+        harness.frame(input(), |ui| {
+            draw(ui, &old);
+        });
+        // Four bytes too, and byte 1 is inside a character.
+        let new = with(vec![dump(1, 0, "éé")], DumpsStatus::Listening);
+        let tree = harness.frame(input(), |ui| {
+            draw(ui, &new);
+        });
+        assert!(tree.node_with_text("éé").is_some());
+    }
+
+    #[test]
+    fn the_kept_lines_go_when_the_screen_shows_no_list() {
+        let harness = Harness::new(egui::Theme::Light);
+        let kept = || harness.ctx.data(|data| data.get_temp::<Lines>(lines_key()));
+        harness.frame(input(), |ui| {
+            draw(ui, &three());
+        });
+        assert!(kept().is_some());
+        // A new daemon session: nothing read yet.
+        harness.frame(input(), |ui| {
+            draw(ui, &connected());
+        });
+        assert!(kept().is_none());
     }
 
     #[test]
