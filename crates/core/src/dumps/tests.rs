@@ -305,6 +305,45 @@ fn floats_are_written_as_php_writes_them() {
 }
 
 #[test]
+fn a_root_of_short_arrays_over_many_rows_renders_in_one_pass() {
+    // The rows are indexed once per render: before that, every short
+    // array scanned the whole row list twice (for its count and its
+    // children), so a bounded line like this asked for about
+    // 500 million comparisons and took seconds to write a little text.
+    let items = 11_500;
+    let rows = 25_000;
+    // The root: a short list `[2 => row 1]`; row 1 holds `items` short
+    // lists, each pointing at the last row, so every lookup travels the
+    // whole list; rows 2 to `rows - 2` are empty filler.
+    let mut row_one = format!("a:{items}:{{");
+    for i in 0..items {
+        let _ = write!(row_one, "i:{i};a:1:{{i:2;i:{};}}", rows - 1);
+    }
+    row_one.push('}');
+    let mut all = format!("a:{rows}:{{i:0;a:1:{{i:0;a:1:{{i:2;i:1;}}}}i:1;");
+    all.push_str(&row_one);
+    for position in 2..rows {
+        let _ = write!(all, "i:{position};a:0:{{}}");
+    }
+    all.push('}');
+    assert!(all.len() < 740_000, "the line is {} bytes", all.len());
+
+    let started = std::time::Instant::now();
+    let dump = parse_line(&line(&all)).expect("a dump");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        dump.text.lines().count(),
+        items + 2,
+        "every item is written"
+    );
+    assert!(!dump.truncated, "the text is whole");
+    assert!(
+        elapsed < std::time::Duration::from_millis(400),
+        "the render took {elapsed:?}"
+    );
+}
+
+#[test]
 fn a_row_that_contains_itself_ends_at_the_depth_limit() {
     let looping = stub(&[
         ("type", "i:4;"),
