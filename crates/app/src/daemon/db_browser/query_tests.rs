@@ -3,8 +3,10 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use marsa_core::types::DbResult;
 use serde_json::{Value, json};
 
+use super::query::{KEPT_RESULTS, Queries, RESULT_KEEP};
 use super::tests::{App, blog, make_file};
 
 const POSTS: &str = "CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT);\
@@ -167,7 +169,7 @@ async fn only_one_statement_of_at_most_256_kib_starts() {
 fn one_statement_at_a_time_on_each_source() {
     use marsa_core::types::DbSource;
 
-    let queries = super::query::Queries::default();
+    let queries = Queries::default();
     let blog = DbSource::SiteFile {
         site: "blog".into(),
     };
@@ -302,4 +304,98 @@ async fn close_cancels_a_running_statement() {
     app.router.send("POST", "/v1/db/close", None).await;
     let event = ended(&app, id).await;
     assert_eq!(event["code"], "db_query_cancelled", "{event}");
+}
+
+/// The job is visible before its task runs: a cancel in that gap counts.
+/// The test's runtime has one thread, so the task has not run yet when the
+/// cancel arrives.
+#[tokio::test]
+async fn a_cancel_before_the_statement_starts_is_not_lost() {
+    let app = App::new();
+    make_file(&app.site("blog").await, POSTS).await;
+    let id = start(&app, LONG).await;
+    let response = app
+        .router
+        .send("DELETE", &format!("/v1/jobs/{id}"), None)
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let event = ended(&app, id).await;
+    assert_eq!(event["code"], "db_query_cancelled", "{event}");
+    let (status, _) = results(&app, &event["id"]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn close_before_the_statement_starts_cancels_it() {
+    let app = App::new();
+    make_file(&app.site("blog").await, POSTS).await;
+    let id = start(&app, LONG).await;
+    app.router.send("POST", "/v1/db/close", None).await;
+    let event = ended(&app, id).await;
+    assert_eq!(event["code"], "db_query_cancelled", "{event}");
+}
+
+/// A text cell of 64 KiB: 128 of them are exactly the 8 MiB of a result.
+const WIDE: &str = "hex(zeroblob(32768))";
+
+#[tokio::test]
+async fn a_row_that_would_pass_the_byte_limit_is_left_out() {
+    let app = App::new();
+    make_file(&app.site("blog").await, POSTS).await;
+    for (asked, kept, cut) in [(128, 128, false), (129, 128, true), (200, 128, true)] {
+        let sql = format!("SELECT {WIDE} FROM posts LIMIT {asked}");
+        let event = query(&app, &sql).await;
+        assert_eq!(
+            (
+                event["data"]["rows"].as_u64(),
+                event["data"]["cut"].as_bool()
+            ),
+            (Some(kept), Some(cut)),
+            "{asked} rows"
+        );
+    }
+}
+
+#[tokio::test]
+async fn one_row_past_the_byte_limit_gives_no_row_and_says_cut() {
+    let app = App::new();
+    make_file(&app.site("blog").await, POSTS).await;
+    let event = query(&app, &format!("SELECT {}", [WIDE; 129].join(", "))).await;
+    assert_eq!(event["status"], "done", "{event}");
+    let (_, json) = results(&app, &event["id"]).await;
+    assert_eq!(json["rows"], json!([]));
+    assert_eq!(json["cut"], true);
+    assert_eq!(json["columns"].as_array().unwrap().len(), 129);
+}
+
+fn no_rows() -> DbResult {
+    DbResult {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        cut: false,
+        elapsed_ms: 0,
+    }
+}
+
+/// With no later statement, no read, and no close.
+#[tokio::test(start_paused = true)]
+async fn rows_no_one_reads_are_dropped_after_their_time() {
+    let queries = Queries::default();
+    queries.keep(1, no_rows());
+    tokio::time::sleep(RESULT_KEEP - Duration::from_secs(1)).await;
+    assert_eq!(queries.kept(), 1);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(queries.kept(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_the_newest_results_are_kept() {
+    let queries = Queries::default();
+    for id in 1..=KEPT_RESULTS as u64 + 1 {
+        queries.keep(id, no_rows());
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(queries.kept(), KEPT_RESULTS);
+    assert!(queries.take(1).is_none());
+    assert!(queries.take(2).is_some());
 }
