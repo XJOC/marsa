@@ -113,6 +113,13 @@ pub struct Daemon {
     /// Held while `global.toml` is read, changed, and written. Use
     /// [`Daemon::lock_global`].
     global_lock: Mutex<()>,
+    /// Held for the whole of each dumps-capture change, from saving
+    /// `global.toml` to applying the setting to the listener, so two
+    /// concurrent `PUT /v1/dumps/capture` cannot interleave their halves
+    /// and leave the file and the listener in opposite states. A
+    /// `tokio::sync::Mutex` held across `.await` as a serialization
+    /// token only (AGENTS.md section 6): it guards no data.
+    dumps_capture_lock: tokio::sync::Mutex<()>,
     /// The parked folders of the last build. Use [`Daemon::watch_parked`].
     parked: watch::Sender<Vec<PathBuf>>,
     /// The database browser: made by the first request that opens a server
@@ -144,6 +151,7 @@ impl Daemon {
             autostart: Autostart::unset(),
             sites_lock: Mutex::default(),
             global_lock: Mutex::default(),
+            dumps_capture_lock: tokio::sync::Mutex::default(),
             parked: watch::Sender::new(Vec::new()),
             db_browser: OnceLock::new(),
         }
@@ -390,6 +398,16 @@ impl Daemon {
         self.global_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// One dumps-capture change at a time: the save of `global.toml` and
+    /// the apply to the listener are one serialized operation (see
+    /// [`Daemon::dumps_capture_lock`]). A `tokio::sync::Mutex` held
+    /// across `.await` as a serialization token only (AGENTS.md
+    /// section 6): it guards no data, so the guard is taken and kept by
+    /// the caller's own async task.
+    pub(crate) fn dumps_capture_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.dumps_capture_lock
     }
 
     fn write_state(&self) -> RwLockWriteGuard<'_, AppState> {

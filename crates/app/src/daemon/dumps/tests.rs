@@ -260,6 +260,54 @@ async fn clear_empties_the_list_and_the_next_id_is_bigger() {
     assert_eq!(service.list(Some(0)).dumps.len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clear_answers_the_empty_snapshot_even_while_dumps_arrive() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use marsa_core::types::Dump;
+
+    use crate::daemon::services::supervisor::now_ms;
+
+    let (service, _shutdown) = listening(Duration::from_secs(60)).await;
+    send(&service, &format!("{}\n", line())).await;
+    until_count(&service, 1).await;
+
+    // What the listener's `keep` does — the store lock and a push — from
+    // another thread, without a pause. Before the fix, a push that landed
+    // between the clear's two lock takes showed up in the DELETE answer.
+    let shared = Arc::clone(&service.shared);
+    let stop = Arc::new(AtomicBool::new(false));
+    let pusher = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let dump = Dump {
+                id: 0,
+                received_at: 0,
+                source_file: None,
+                source_line: None,
+                uri: None,
+                method: None,
+                label: None,
+                text: "pushed".to_owned(),
+                truncated: false,
+            };
+            while !stop.load(Ordering::Relaxed) {
+                lock(&shared.store).push(dump.clone(), now_ms());
+            }
+        })
+    };
+    for round in 0..2_000 {
+        let cleared = service.clear();
+        assert!(
+            cleared.dumps.is_empty() && cleared.count == 0,
+            "round {round}: the DELETE answer held {} dumps",
+            cleared.dumps.len()
+        );
+    }
+    stop.store(true, Ordering::Relaxed);
+    pusher.join().expect("the pusher ended");
+}
+
 #[tokio::test]
 async fn many_dumps_make_a_few_events_and_the_last_one_is_current() {
     let (service, shutdown) = listening(Duration::from_secs(60)).await;

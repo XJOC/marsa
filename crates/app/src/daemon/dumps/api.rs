@@ -73,6 +73,12 @@ async fn set_capture(
     // The save and the switch in a task of their own: a client that hangs up
     // drops this handler, and must not leave the setting saved but not applied.
     let job = tokio::spawn(async move {
+        // One change at a time, save and apply together: without this, a
+        // second PUT could save and apply between this one's save and its
+        // apply, and `global.toml` would say one thing while the listener
+        // does the other. The lock is held across `.await` as a
+        // serialization token only (AGENTS.md section 6).
+        let _one = daemon.dumps_capture_lock().lock().await;
         let worker = Arc::clone(&daemon);
         http::blocking("dumps setting", move || save(&worker, enabled)).await?;
         // Also when nothing changed: it tries a port that was busy again.
@@ -260,5 +266,82 @@ mod tests {
         ] {
             app.assert_refused_without_auth(method, path).await;
         }
+    }
+
+    /// One `PUT /v1/dumps/capture` released by `hold`.
+    async fn put(
+        app: std::sync::Arc<TestRouter>,
+        hold: std::sync::Arc<tokio::sync::Barrier>,
+        enabled: bool,
+    ) -> (StatusCode, serde_json::Value) {
+        hold.wait().await;
+        app.answer(
+            "PUT",
+            "/v1/dumps/capture",
+            Some(json!({ "enabled": enabled })),
+        )
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_capture_puts_at_once_keep_the_file_and_the_listener_together() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let (plain, daemon) = router(tmp.path());
+        let app = std::sync::Arc::new(plain);
+        app.answer("PUT", "/v1/dumps/capture", Some(json!({ "enabled": true })))
+            .await;
+        assert_eq!(daemon.dumps().status(), DumpsStatus::Listening);
+
+        // Two PUTs of opposite values, released together by a barrier.
+        // Who wins may change from round to round, but `global.toml` and
+        // the listener may never disagree: the save and the apply are
+        // one serialized operation.
+        for round in 0..20 {
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let values = if round % 2 == 0 {
+                (false, true)
+            } else {
+                (true, false)
+            };
+            let one = tokio::spawn(put(
+                std::sync::Arc::clone(&app),
+                std::sync::Arc::clone(&barrier),
+                values.0,
+            ));
+            let two = tokio::spawn(put(std::sync::Arc::clone(&app), barrier, values.1));
+            // Let both PUTs reach the save before the load task lands:
+            // the save is the last step whose order decides the file.
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+            // A worker that is busy here delays one PUT's apply until
+            // after the other's save-and-apply — the window in which the
+            // unserialized halves could leave the file and the listener
+            // in opposite states.
+            tokio::spawn(async move {
+                let until = std::time::Instant::now() + std::time::Duration::from_millis(30);
+                let mut spin = 0_u64;
+                while std::time::Instant::now() < until {
+                    spin = spin.wrapping_add(1);
+                    std::hint::black_box(spin);
+                }
+            });
+            for job in [one, two] {
+                let (status, _) = job.await.expect("the PUT ran");
+                assert_eq!(status, StatusCode::OK, "round {round}");
+            }
+            let saved = crate::daemon::dumps::enabled_in_config(tmp.path());
+            let listening = daemon.dumps().status() == DumpsStatus::Listening;
+            assert_eq!(
+                saved,
+                listening,
+                "round {round}: global.toml says {saved} but the listener is {:?}",
+                daemon.dumps().status()
+            );
+        }
+        daemon
+            .dumps()
+            .shutdown(std::time::Duration::from_secs(2))
+            .await;
     }
 }
