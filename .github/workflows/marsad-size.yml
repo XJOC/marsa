@@ -82,13 +82,42 @@ jobs:
           done
           exit "$failed"
 
-      - name: Build marsad at this change and at the baseline
+      - name: Build marsad at this change
         run: |
           exe=""
           if [ "${{ runner.os }}" = "Windows" ]; then exe=".exe"; fi
           cargo build -p marsa --release --bin marsad --bin marsa
           cp "target/release/marsad$exe" "$RUNNER_TEMP/marsad-new$exe"
           cp "target/release/marsa$exe" "$RUNNER_TEMP/marsa-new$exe"
+
+      - name: Build marsad at the baseline, with the same release profile
+        env:
+          # The baseline commit has no [profile.release]. Without these it
+          # would build with Cargo's defaults, a larger program, and the
+          # growth would look smaller than it is. They repeat Cargo.toml.
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_RELEASE_LTO: fat
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+        run: |
+          # Each key of [profile.release] as the variable that sets it. A
+          # subtable has no variable, so it fails the check too.
+          wanted="$(tr -d '\r' < Cargo.toml | awk '
+            /^\[profile\.release\./ { print "unsupported: " $0 }
+            /^\[/ { inside = ($0 == "[profile.release]"); next }
+            inside && /^[^#]*=/ {
+              sub(/#.*/, ""); split($0, pair, "=")
+              gsub(/[ \t"]/, "", pair[1]); gsub(/[ \t"]/, "", pair[2]); gsub(/-/, "_", pair[1])
+              print "CARGO_PROFILE_RELEASE_" toupper(pair[1]) "=" pair[2]
+            }' | sort)"
+          given="$(env | grep '^CARGO_PROFILE_RELEASE_' | sort || true)"
+          if [ -z "$wanted" ] || [ "$wanted" != "$given" ]; then
+            echo "FAIL: the baseline's profile is not [profile.release] of Cargo.toml"
+            printf 'Cargo.toml:\n%s\nthis step:\n%s\n' "$wanted" "$given"
+            exit 1
+          fi
+          printf 'both builds use:\n%s\n' "$given"
+          exe=""
+          if [ "${{ runner.os }}" = "Windows" ]; then exe=".exe"; fi
           git worktree add --detach "$RUNNER_TEMP/baseline" "$BASELINE"
           # The same target folder, so the dependencies both share build once.
           (cd "$RUNNER_TEMP/baseline" && cargo build -p marsa --release --bin marsad --target-dir "$GITHUB_WORKSPACE/target")
