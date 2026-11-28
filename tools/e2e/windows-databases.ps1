@@ -5,9 +5,9 @@
 # None of the three is in the signed manifest yet, so the script puts each
 # where `marsa install` would: MySQL from Oracle's CDN, checked against its
 # .md5; PostgreSQL from theseus-rs, checked against its .sha256; Valkey from
-# the archive in $env:VALKEY_ZIP (the artifact of a valkey-build run, with
-# its .sha256 beside it). Without that archive Valkey is skipped, with a
-# notice: its release is a draft until the owner publishes it.
+# our published release, checked against its sha256sums.txt. To test a new
+# Valkey build before its release, $env:VALKEY_ZIP names its archive (the
+# artifact of a valkey-build run, with its .sha256 beside it).
 #
 # It creates a local user and lets the group Users log on locally, so run it
 # only on a machine that is thrown away afterwards: a GitHub runner. It
@@ -34,6 +34,7 @@ $Temp = $env:RUNNER_TEMP
 $MysqlVersion = '8.4.13'
 $PgVersion = '18.7.0'
 $ValkeyVersion = '8.1.11'
+$ValkeyRelease = "https://github.com/XJOC/marsa/releases/download/valkey-$ValkeyVersion-r1"
 # Not the default ports: the runner's image has a MySQL and a PostgreSQL of
 # its own.
 $MysqlPort = 3316
@@ -87,7 +88,10 @@ function AsUser([string]$Program, [string[]]$Arguments, [int]$Seconds = 300) {
     $text = (@($stdout, $stderr) | ForEach-Object { if (Test-Path -LiteralPath $_) { Get-Content -LiteralPath $_ -Raw } }) -join ''
     $script:Out = "$text".TrimEnd()
     $script:Exit = $process.ExitCode
-    Write-Host $script:Out
+    # A cut copy for the log: one value of `marsa db key` can be 64 KiB.
+    $shown = $script:Out
+    if ($shown.Length -gt 4000) { $shown = $shown.Substring(0, 4000) + "`n... ($($shown.Length) characters)" }
+    Write-Host $shown
     if (-not $ended) { Fail "$line did not end within $Seconds s" }
 }
 
@@ -215,17 +219,34 @@ function WaitGone([string[]]$Names, [int]$Seconds) {
     Fail "still running after $Seconds s: $($left -join ', ')"
 }
 
+# Fails unless $File has the sum that $Lines give: the first word of the first
+# line, or with $Name the one of the line `<sum>  <name>`, as sha256sum writes.
+function CheckSum([string]$File, [string]$Algorithm, [string[]]$Lines, [string]$Name = '') {
+    if ($Name) { $Lines = @($Lines | Where-Object { $_ -match "^\S+\s+\*?$([regex]::Escape($Name))\s*$" }) }
+    if (@($Lines).Count -lt 1) { Fail "no $Algorithm sum for $File" }
+    $want = ($Lines[0].Trim() -split '\s+')[0].ToLowerInvariant()
+    $got = (Get-FileHash -Algorithm $Algorithm -LiteralPath $File).Hash.ToLowerInvariant()
+    if ($want -ne $got) { Fail "$Algorithm of $File is $got, expected $want" }
+    Write-Host "$Algorithm $got matches"
+}
+
 # Downloads $Url to $File, then checks it against the sum file beside it
-# ($Algorithm: MD5 for Oracle, SHA256 for theseus and our Valkey build).
-function Download([string]$Url, [string]$File, [string]$Algorithm) {
+# ($Algorithm: MD5 for Oracle, SHA256 for theseus), or with -Listed against
+# its line in the sha256sums.txt of the same folder (our releases).
+function Download([string]$Url, [string]$File, [string]$Algorithm, [switch]$Listed) {
     Write-Host "`$ curl $Url"
     & curl.exe -fsSL --retry 5 --retry-delay 5 --max-time 900 -o $File $Url
     if ($LASTEXITCODE -ne 0) { Fail "cannot download $Url" }
-    $ext = $Algorithm.ToLowerInvariant()
-    $want = ((& curl.exe -fsSL --retry 5 --max-time 60 "$Url.$ext") -split '\s+')[0].ToLowerInvariant()
-    $got = (Get-FileHash -Algorithm $Algorithm -LiteralPath $File).Hash.ToLowerInvariant()
-    if ($want -ne $got) { Fail "$Algorithm of $Url is $got, its .$ext says $want" }
-    Write-Host "$Algorithm $got matches"
+    $slash = $Url.LastIndexOf('/')
+    $sums = "$Url.$($Algorithm.ToLowerInvariant())"
+    $name = ''
+    if ($Listed) {
+        $sums = "$($Url.Substring(0, $slash))/sha256sums.txt"
+        $name = $Url.Substring($slash + 1)
+    }
+    $lines = @(& curl.exe -fsSL --retry 5 --max-time 60 $sums)
+    if ($LASTEXITCODE -ne 0) { Fail "cannot download $sums" }
+    CheckSum $File $Algorithm $lines $name
 }
 
 # Unpacks the zip $File into the version folder $Into, as `marsa install`
@@ -273,6 +294,29 @@ function Valkey {
     $text = (& $ValkeyCli -h 127.0.0.1 -p $ValkeyPort @args 2>&1 | ForEach-Object { "$_" }) -join "`n"
     if ($LASTEXITCODE -ne 0) { Fail "valkey-cli $($args -join ' ') -> $text" }
     return $text.Trim()
+}
+
+# Commands for valkey-cli on its stdin, one a line, never as arguments: the
+# Cygwin runtime expands a `*` in the arguments a Windows program gives it.
+function ValkeyLines([string[]]$Lines) {
+    $ErrorActionPreference = 'Continue'
+    $text = ($Lines | & $ValkeyCli -h 127.0.0.1 -p $ValkeyPort 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    Write-Host $text
+    if ($LASTEXITCODE -ne 0 -or $text -match '\b(ERR|NOPERM|WRONGTYPE)\b|Invalid argument') { Fail "valkey-cli: $text" }
+}
+
+# `marsa db <args>` as the plain user: its output holds every one of $Texts.
+function Shows([string[]]$Texts) {
+    MarsaOk db @args
+    foreach ($text in $Texts) {
+        if (-not $script:Out.Contains($text)) { Fail "marsa db $($args -join ' '): no `"$text`"" }
+    }
+}
+
+# `marsa db <args>` fails with the error code $Code.
+function Refused([string]$Code) {
+    Marsa db @args
+    if ($script:Exit -eq 0 -or -not $script:Out.Contains($Code)) { Fail "marsa db $($args -join ' '): not refused with $Code" }
 }
 
 # What helps to understand a failure. Never `run\daemon.json`.
@@ -399,30 +443,25 @@ try {
     Write-Host $version
     if (-not $version.StartsWith('postgres (PostgreSQL) 18.7')) { Fail 'postgres --version' }
 
-    Step "Valkey $ValkeyVersion (Cygwin) from a valkey-build run"
-    $WithValkey = $false
-    $valkeyZip = $env:VALKEY_ZIP
-    if ($valkeyZip -and (Test-Path -LiteralPath $valkeyZip)) {
-        $want = ((Get-Content -LiteralPath "$valkeyZip.sha256" -Raw) -split '\s+')[0].ToLowerInvariant()
-        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $valkeyZip).Hash.ToLowerInvariant()
-        if ($want -ne $got) { Fail "sha256 of $valkeyZip is $got, its .sha256 says $want" }
-        $VkDir = Join-Path $Data "runtimes\valkey\$ValkeyVersion"
-        $copy = Join-Path $Temp 'valkey.zip'
-        Copy-Item -LiteralPath $valkeyZip -Destination $copy
-        Unpack $copy $VkDir
-        $ValkeyCli = Join-Path $VkDir 'bin\valkey-cli.exe'
-        $version = (& (Join-Path $VkDir 'bin\valkey-server.exe') --version) -join ' '
-        Write-Host $version
-        if (-not $version.StartsWith("Valkey server v=$ValkeyVersion ")) { Fail 'valkey-server --version' }
-        $WithValkey = $true
+    Step "Valkey $ValkeyVersion (Cygwin), checked against its sum"
+    $name = "valkey-$ValkeyVersion-windows-x64.zip"
+    $zip = Join-Path $Temp $name
+    if ($env:VALKEY_ZIP) {
+        Write-Host "a new build, not the release: $env:VALKEY_ZIP"
+        if (-not (Test-Path -LiteralPath $env:VALKEY_ZIP)) { Fail "no file at VALKEY_ZIP: $env:VALKEY_ZIP" }
+        Copy-Item -LiteralPath $env:VALKEY_ZIP -Destination $zip
+        CheckSum $zip 'SHA256' @(Get-Content -LiteralPath "$env:VALKEY_ZIP.sha256")
     } else {
-        # TODO: take the archive from the published release valkey-8.1.11-r1
-        # once the owner publishes it, as valkey-e2e.yml will.
-        Write-Host "::notice title=Valkey skipped::No Valkey archive (VALKEY_ZIP is '$valkeyZip'): the artifact of the valkey-build run has expired or was not given. Valkey on Windows was not tested in this run."
+        Download "$ValkeyRelease/$name" $zip 'SHA256' -Listed
     }
+    $VkDir = Join-Path $Data "runtimes\valkey\$ValkeyVersion"
+    Unpack $zip $VkDir
+    $ValkeyCli = Join-Path $VkDir 'bin\valkey-cli.exe'
+    $version = (& (Join-Path $VkDir 'bin\valkey-server.exe') --version) -join ' '
+    Write-Host $version
+    if (-not $version.StartsWith("Valkey server v=$ValkeyVersion ")) { Fail 'valkey-server --version' }
 
-    $global = "[mysql]`ndefault = `"8.4`"`nport = $MysqlPort`n`n[postgres]`ndefault = `"18`"`nport = $PgPort`n"
-    if ($WithValkey) { $global += "`n[valkey]`ndefault = `"8.1`"`nport = $ValkeyPort`n" }
+    $global = "[mysql]`ndefault = `"8.4`"`nport = $MysqlPort`n`n[postgres]`ndefault = `"18`"`nport = $PgPort`n`n[valkey]`ndefault = `"8.1`"`nport = $ValkeyPort`n"
     Set-Content -LiteralPath (Join-Path $Data 'config\global.toml') -Value $global -Encoding utf8NoBOM -NoNewline
 
     Step 'MySQL: the first init, then the server, as the plain user'
@@ -527,34 +566,86 @@ try {
         (PgSql "select count(*) from pg_stat_activity where state = 'active' and query like 'SELECT pg_sleep%'") -eq '0'
     }
 
-    if ($WithValkey) {
-        Step 'Valkey (Cygwin) in a folder with spaces: SHUTDOWN SAVE writes dump.rdb there'
-        MarsaOk services start valkey
-        $null = CheckServer 'valkey-server.exe' $ValkeyPort
-        $conf = Get-Content -LiteralPath (Join-Path $Data 'run\valkey.conf') -Raw
-        $dir = ($conf -split "`r?`n" | Where-Object { $_ -like 'dir *' })
-        Write-Host $dir
-        # `C:\Users\marsa db\...` in Cygwin's form, spaces and all.
-        $cygwin = '/cygdrive/' + $Data.Substring(0, 1).ToLowerInvariant() + $Data.Substring(2).Replace('\', '/')
-        if ($dir -cne "dir `"$cygwin/databases/valkey`"") { Fail "valkey.conf: $dir" }
-        if ((Valkey PING) -ne 'PONG') { Fail 'no PONG' }
-        if ((Valkey SET k1 v1) -ne 'OK') { Fail 'SET' }
-        MarsaOk services stop valkey
-        WaitGone @('valkey-server.exe') 5
-        $dump = Join-Path $Data 'databases\valkey\dump.rdb'
-        if (-not (Test-Path -LiteralPath $dump)) { Fail "no $dump" }
-        Write-Host "dump.rdb: $((Get-Item -LiteralPath $dump).Length) bytes"
-        MarsaOk services start valkey
-        if ((Valkey GET k1) -ne 'v1') { Fail 'k1 did not survive the clean stop' }
+    Step 'Valkey (Cygwin) in a folder with spaces: SHUTDOWN SAVE writes dump.rdb there'
+    MarsaOk services start valkey
+    $null = CheckServer 'valkey-server.exe' $ValkeyPort
+    $conf = Get-Content -LiteralPath (Join-Path $Data 'run\valkey.conf') -Raw
+    $dir = ($conf -split "`r?`n" | Where-Object { $_ -like 'dir *' })
+    Write-Host $dir
+    # `C:\Users\marsa db\...` in Cygwin's form, spaces and all.
+    $cygwin = '/cygdrive/' + $Data.Substring(0, 1).ToLowerInvariant() + $Data.Substring(2).Replace('\', '/')
+    if ($dir -cne "dir `"$cygwin/databases/valkey`"") { Fail "valkey.conf: $dir" }
+    if ((Valkey PING) -ne 'PONG') { Fail 'no PONG' }
+    if ((Valkey SET k1 v1) -ne 'OK') { Fail 'SET' }
+    MarsaOk services stop valkey
+    WaitGone @('valkey-server.exe') 5
+    $dump = Join-Path $Data 'databases\valkey\dump.rdb'
+    if (-not (Test-Path -LiteralPath $dump)) { Fail "no $dump" }
+    Write-Host "dump.rdb: $((Get-Item -LiteralPath $dump).Length) bytes"
+    Refused 'db_server_not_running' keys valkey/0
+    MarsaOk services start valkey
+    if ((Valkey GET k1) -ne 'v1') { Fail 'k1 did not survive the clean stop' }
+
+    Step 'the database browser: marsa db keys and marsa db key, which only read'
+    # Every type, a value that is not text, a string of 200,000 bytes, a list
+    # of 900 items, and 3,000 keys for more than one page.
+    ValkeyLines @(
+        'SELECT 1'
+        'SET laravel_cache_total 412 EX 600'
+        'SELECT 0'
+        'HSET marsa-e2e-cart sku 14 qty 2'
+        'ZADD marsa-e2e-top 12.5 ada'
+        'SADD marsa-e2e-ids 12'
+        'XADD marsa-e2e-log * k v'
+        'SET marsa-e2e-binary "\xff\x00\xfe"'
+        "EVAL `"redis.call('SET', 'marsa-e2e-long', string.rep('v', 200000)) for i = 1, 900 do redis.call('RPUSH', 'marsa-e2e-jobs', 'job ' .. i) end for i = 1, 3000 do redis.call('SET', 'page:' .. i, i) end`" 0"
+    )
+    # k1, the five keys above, the long string, the list, and the 3,000 pages.
+    $keys = Valkey DBSIZE
+    if ($keys -ne '3008') { Fail "$keys keys in database 0, not 3008" }
+    Shows 'valkey/1'
+    Shows 'laravel_cache_total', '1 key in valkey/1.' keys valkey/1
+    Shows 'string, expires in ', '412' key valkey/1 laravel_cache_total
+    Shows 'marsa-e2e-cart' keys valkey/0 --match 'marsa-e2e-c*'
+    Shows 'marsa-e2e-top' keys valkey/0 --type zset
+    if ($script:Out.Contains('marsa-e2e-cart')) { Fail '--type zset listed a hash' }
+    Shows 'hash, no expiry, 2 fields', 'sku' key valkey/0 marsa-e2e-cart
+    Shows 'zset, no expiry, 1 member', '12.5' key valkey/0 marsa-e2e-top
+    Shows 'set, no expiry, 1 member', '12' key valkey/0 marsa-e2e-ids
+    Shows 'Marsa does not show values of this type.' key valkey/0 marsa-e2e-log
+    Shows 'Marsa shows the first 65.5 KB of 200.0 KB.' key valkey/0 marsa-e2e-long
+    Shows 'list, no expiry, 900 items', 'job 500', 'Marsa shows the first 500 of 900.' key valkey/0 marsa-e2e-jobs
+    if ($script:Out.Contains('job 501')) { Fail 'more than 500 items' }
+    Shows '(binary, 3 B)' key valkey/0 marsa-e2e-binary
+    # Every one of the 3,000 keys, page by page.
+    $found = New-Object 'System.Collections.Generic.HashSet[string]'
+    $cursor = '0'
+    $pages = 0
+    while ($cursor) {
+        if ($pages -ge 100) { Fail 'the pages do not end' }
+        MarsaOk db keys valkey/0 --match 'page:*' --cursor $cursor
+        foreach ($line in $script:Out -split "`r?`n") { if ($line -match '^page:\d+$') { $null = $found.Add($line) } }
+        $pages++
+        $cursor = if ($script:Out -match 'More keys: .* --cursor (\d+)') { $Matches[1] } else { '' }
+    }
+    Write-Host "$($found.Count) keys in $pages pages"
+    if ($found.Count -ne 3000) { Fail "the pages gave $($found.Count) of 3000 keys" }
+    if ($pages -le 1) { Fail '3000 keys came as one page' }
+    Refused 'db_key_not_found' key valkey/0 marsa-e2e-no-such-key
+    Refused 'db_source_invalid' keys valkey/16
+    if ((Valkey DBSIZE) -ne $keys) { Fail 'the number of keys changed' }
+    $log = LogSince 'marsad.log' 0
+    foreach ($secret in 'marsa-e2e-cart', 'laravel_cache_total') {
+        if ($log.Contains($secret)) { Fail "marsad's log holds $secret" }
     }
 
     Step 'marsad ended by force (Stop-Process -Force, as Task Manager does): the servers end with it'
-    $ids = @('mysql', 'postgres') + $(if ($WithValkey) { @('valkey') } else { @() })
-    $names = @('mysqld.exe', 'postgres.exe') + $(if ($WithValkey) { @('valkey-server.exe') } else { @() })
+    $ids = @('mysql', 'postgres', 'valkey')
+    $names = @('mysqld.exe', 'postgres.exe', 'valkey-server.exe')
     WaitRunning $ids
     $null = MySql 'app' "insert into posts values (2, 'after the clean stop')"
     $null = PgSql "insert into posts values (2, 'after the clean stop')"
-    if ($WithValkey) { $null = Valkey SET k2 v2 }
+    $null = Valkey SET k2 v2
     $marsad = @(Ours 'marsad.exe')
     if ($marsad.Count -ne 1) { Fail "$($marsad.Count) marsad processes run" }
     $myMark = LogMark 'mysql.log'
@@ -571,18 +662,16 @@ try {
     WaitRunning $ids
     # No retry: `running` means each server takes connections.
     if ((PgSql 'select 1') -ne '1') { Fail 'PostgreSQL is running and does not answer' }
-    if ($WithValkey -and (Valkey PING) -ne 'PONG') { Fail 'Valkey is running and does not answer' }
+    if ((Valkey PING) -ne 'PONG') { Fail 'Valkey is running and does not answer' }
     $log = LogSince 'mysql.log' $myMark
     if ($log -notmatch 'crash recovery') { Info "MySQL logged no crash recovery: $log" }
     if ((MySql 'app' 'select count(*) from posts') -ne '2') { Fail 'MySQL lost a committed row' }
     $log = LogSince 'postgres.log' $pgMark
     if ($log -notmatch 'not properly shut down|automatic recovery|interrupted') { Fail "PostgreSQL did not recover: $log" }
     if ((PgSql 'select count(*) from posts') -ne '2') { Fail 'PostgreSQL lost a committed row' }
-    if ($WithValkey) {
-        if ((Valkey GET k1) -ne 'v1') { Fail 'Valkey lost what its last clean stop saved' }
-        # What changed after the last clean stop is lost (ADR 0023, section 8).
-        Info "Valkey's key set after its last clean stop, after the kill: '$(Valkey GET k2)'"
-    }
+    if ((Valkey GET k1) -ne 'v1') { Fail 'Valkey lost what its last clean stop saved' }
+    # What changed after the last clean stop is lost (ADR 0023, section 8).
+    Info "Valkey's key set after its last clean stop, after the kill: '$(Valkey GET k2)'"
 
     Step 'marsa daemon stop: every server stops cleanly'
     $myMark = LogMark 'mysql.log'
@@ -613,7 +702,7 @@ try {
     $ErrorActionPreference = 'Stop'
     if (@(Ours 'postgres.exe').Count -ne 0) { Fail 'postgres.exe ran under an elevated marsad' }
 
-    Write-Host "`nPASS: MySQL, PostgreSQL$(if ($WithValkey) { ', and Valkey' }) on Windows as a plain user"
+    Write-Host "`nPASS: MySQL, PostgreSQL, and Valkey on Windows as a plain user"
     exit 0
 } catch {
     Write-Host $_.ToString()
