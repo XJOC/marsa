@@ -1,5 +1,5 @@
 //! The Databases screen's state (ADR 0028): what can be opened, the source
-//! the user chose, and its tables. No event carries them, so the screen
+//! the user chose, and its tables, or Valkey's keys ([`keys`]). No event carries them, so the screen
 //! reads them as it opens, when the user picks a source, and when a server
 //! or the site list changes while it is open. Leaving the screen drops the
 //! lists and closes the daemon's connections; the chosen source stays.
@@ -12,8 +12,12 @@ use marsa_core::types::{DbServer, DbSource, DbSources, DbTables};
 use super::*;
 use crate::bridge::{DbCommand, DbUpdate};
 
+mod keys;
 mod query;
 mod table;
+pub use keys::{
+    KEY_LIST_LIMIT, KeyBrowser, KeyList, KeyShape, KeyValue, KeysAction, OpenKey, ReadError,
+};
 pub use query::{QueryRun, QueryState};
 pub use table::{DbAction, DbTab, OpenTable, PaneValue};
 
@@ -34,6 +38,9 @@ pub struct DbBrowserState {
     pub sources: Option<DbSources>,
     /// The source the user chose, or the first one the screen opened.
     pub chosen: Option<DbSource>,
+    /// Set while the chosen source is a database of Valkey: then `chosen`
+    /// is `None`.
+    pub keys: Option<KeyBrowser>,
     /// The tables of `chosen`, once read.
     pub tables: Option<DbTables>,
     /// What "Find a table" holds: the list is filtered here, with no read.
@@ -57,6 +64,9 @@ pub struct DbBrowserState {
     rows_id: Option<u64>,
     value_id: Option<u64>,
     table_id: Option<u64>,
+    /// The read of keys, and whether it adds to the list.
+    keys_id: Option<(u64, bool)>,
+    key_id: Option<u64>,
     /// A read the model asks for after an answer or an event.
     pending: Option<DbCommand>,
 }
@@ -77,6 +87,12 @@ pub enum DbScreen {
     Failed(String),
     /// The tables of the chosen source (an empty list says "No tables").
     Tables,
+    /// Valkey is installed and does not run.
+    KeysStopped,
+    /// Valkey asked for a password.
+    KeysSignInFailed,
+    /// The keys of the chosen database.
+    Keys,
 }
 
 impl DbBrowserState {
@@ -126,6 +142,39 @@ impl DbBrowserState {
         database.or_else(file)
     }
 
+    /// Whether the last list says Valkey takes commands.
+    fn valkey_runs(&self) -> bool {
+        self.sources
+            .as_ref()
+            .and_then(|sources| sources.valkey.as_ref())
+            .is_some_and(|info| !info.databases.is_empty())
+    }
+
+    /// Database `db` of Valkey becomes the source: what the SQL source gave
+    /// goes.
+    fn choose_keys(&mut self, db: u8) {
+        self.chosen = None;
+        self.tables = None;
+        self.open = None;
+        self.query = None;
+        self.query_id = None;
+        self.tables_id = None;
+        self.error = None;
+        self.filter.clear();
+        self.keys_id = None;
+        self.key_id = None;
+        self.keys = Some(KeyBrowser::of(db));
+    }
+
+    /// With no database and no file to open: Valkey, when it runs or when no
+    /// SQL server says why it cannot be opened.
+    fn opens_keys_first(&self) -> bool {
+        let Some(sources) = &self.sources else {
+            return false;
+        };
+        sources.valkey.is_some() && (self.valkey_runs() || sources.servers.is_empty())
+    }
+
     /// The screen's state now.
     pub fn screen(&self) -> DbScreen {
         let Some(sources) = &self.sources else {
@@ -134,8 +183,13 @@ impl DbBrowserState {
                 None => DbScreen::Loading,
             };
         };
-        if sources.servers.is_empty() && sources.files.is_empty() {
+        if sources.servers.is_empty() && sources.files.is_empty() && sources.valkey.is_none() {
             return DbScreen::Empty;
+        }
+        if self.keys.is_some()
+            && let Some(info) = &sources.valkey
+        {
+            return keys::screen(info);
         }
         // A server with nothing to open says why.
         let server = match &self.chosen {
@@ -169,11 +223,13 @@ impl DbBrowserState {
 
 impl Model {
     /// The sidebar has a Databases item when something could be opened: a
-    /// SQL server is installed, or a Laravel site may hold a SQLite file.
+    /// SQL server or Valkey is installed, or a Laravel site may hold a
+    /// SQLite file.
     /// Reading the list itself would open the servers' connections at start.
     pub fn has_databases(&self) -> bool {
         !self.installed(Runtime::Mysql).is_empty()
             || !self.installed(Runtime::Postgres).is_empty()
+            || !self.installed(Runtime::Valkey).is_empty()
             || self
                 .session
                 .sites
@@ -220,6 +276,11 @@ impl Model {
         db.rows_id = None;
         db.value_id = None;
         db.table_id = None;
+        db.keys_id = None;
+        db.key_id = None;
+        if let Some(keys) = db.keys.as_mut() {
+            keys.drop_read();
+        }
         // The close cancels a statement still running.
         db.query = None;
         db.query_id = None;
@@ -240,6 +301,9 @@ impl Model {
         if db.chosen.as_ref() == Some(&source) && db.tables.is_some() {
             return None;
         }
+        db.keys = None;
+        db.keys_id = None;
+        db.key_id = None;
         if db.chosen.as_ref() != Some(&source) {
             db.open = None;
             db.query = None;
@@ -289,6 +353,9 @@ impl Model {
             update @ (DbUpdate::QueryStarted { .. } | DbUpdate::Query { .. }) => {
                 self.db_query_update(update);
             }
+            update @ (DbUpdate::Keys { .. } | DbUpdate::Key { .. }) => {
+                self.db_keys_update(update);
+            }
             update => self.db_table_update(update),
         }
     }
@@ -324,6 +391,14 @@ impl Model {
         }
         db.sources = Some(sources);
         db.error = None;
+        if db.keys.is_some() {
+            if db.sources.as_ref().is_some_and(|s| s.valkey.is_some()) {
+                self.db_keys_sources_read();
+                return;
+            }
+            // Valkey was uninstalled: another source is chosen.
+            db.keys = None;
+        }
         let keep = db.chosen.as_ref().is_some_and(|chosen| db.listed(chosen));
         if !keep {
             let first = db.first();
@@ -331,6 +406,12 @@ impl Model {
                 db.tables = None;
             }
             db.chosen = first;
+            // With no SQL source to open, Valkey's database 0.
+            if db.chosen.is_none() && db.opens_keys_first() {
+                db.choose_keys(0);
+                self.db_keys_sources_read();
+                return;
+            }
         }
         let read = db.chosen.clone().filter(|_| db.tables.is_none());
         if let Some(source) = read {

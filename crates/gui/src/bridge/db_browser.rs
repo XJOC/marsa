@@ -4,8 +4,8 @@
 
 use marsa_core::client::DaemonClient;
 use marsa_core::types::{
-    DbCellRequest, DbPage, DbQueryRequest, DbResult, DbRowsRequest, DbSource, DbSources, DbTable,
-    DbTableRef, DbTables, DbValue,
+    DbCellRequest, DbKeyDetail, DbKeyRequest, DbKeys, DbKeysRequest, DbPage, DbQueryRequest,
+    DbResult, DbRowsRequest, DbSource, DbSources, DbTable, DbTableRef, DbTables, DbValue,
 };
 
 use crate::model::Update;
@@ -31,11 +31,16 @@ pub enum DbCommand {
     RunQuery { id: u64, request: DbQueryRequest },
     /// Stops the running statement's job.
     CancelQuery { job: u64 },
+    /// A page of Valkey's keys.
+    ReadKeys { id: u64, request: DbKeysRequest },
+    /// One key's value.
+    ReadKey { id: u64, request: DbKeyRequest },
     /// The screen was left: the daemon closes the browser's connections.
     Close,
 }
 
-/// A refused statement: the client error code, and the server's own words.
+/// A refused statement or read: the client error code, and the server's own
+/// words.
 pub(crate) type QueryError = (String, Option<String>);
 
 /// The daemon's answer to a [`DbCommand`], with the read's `id`, or a
@@ -62,6 +67,14 @@ pub enum DbUpdate {
         id: u64,
         result: Result<DbTable, String>,
     },
+    Keys {
+        id: u64,
+        result: Result<DbKeys, QueryError>,
+    },
+    Key {
+        id: u64,
+        result: Result<DbKeyDetail, QueryError>,
+    },
     /// The statement's job started: its id, for Cancel.
     QueryStarted {
         id: u64,
@@ -82,6 +95,10 @@ pub(super) async fn run(
     window: &super::Window,
 ) -> Option<Update> {
     let code = |err: marsa_core::client::ClientError| err.code().to_owned();
+    let failed = |err: marsa_core::client::ClientError| {
+        let detail = err.detail().map(str::to_owned);
+        (err.code().to_owned(), detail)
+    };
     match command {
         DbCommand::ReadSources { id } => Some(Update::Db(DbUpdate::Sources {
             id,
@@ -103,11 +120,15 @@ pub(super) async fn run(
             id,
             result: client.db_table(&source, &table).await.map_err(code),
         })),
+        DbCommand::ReadKeys { id, request } => Some(Update::Db(DbUpdate::Keys {
+            id,
+            result: client.db_keys(&request).await.map_err(failed),
+        })),
+        DbCommand::ReadKey { id, request } => Some(Update::Db(DbUpdate::Key {
+            id,
+            result: client.db_key(&request).await.map_err(failed),
+        })),
         DbCommand::RunQuery { id, request } => {
-            let failed = |err: marsa_core::client::ClientError| {
-                let detail = err.detail().map(str::to_owned);
-                (err.code().to_owned(), detail)
-            };
             let job = match client.start_db_query(&request).await {
                 Ok(job) => job,
                 Err(err) => {

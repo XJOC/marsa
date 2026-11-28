@@ -9,14 +9,13 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
-use eframe::egui::{
-    Align, CornerRadius, Frame, Label, Layout, Margin, RichText, Stroke, Ui, Vec2, vec2,
-};
+use eframe::egui::{Align, Layout, Ui, Vec2, vec2};
 use marsa_core::codes;
 use marsa_core::db_browser::{Engine, SQL_BYTES, statement_at};
 use marsa_core::types::{DbCell, DbResult, DbSource};
 
 use super::super::lines::message;
+use super::pane;
 use crate::model::{Action, DbAction, QueryRun, QueryState};
 use crate::strings;
 use crate::theme::page::SQL_EDITOR_LINES;
@@ -160,7 +159,7 @@ fn result(ui: &mut Ui, theme: &Theme, source: &DbSource, run: Option<&QueryRun>)
             message(ui, theme, strings::DB_DONE_NO_ROWS);
         }
         QueryState::Done(result) => rows(ui, theme, result),
-        QueryState::Failed { code, detail } => banner(ui, theme, source, code, detail.as_deref()),
+        QueryState::Failed { code, detail } => refused(ui, theme, source, code, detail.as_deref()),
     }
 }
 
@@ -228,43 +227,14 @@ fn copy(ui: &Ui, result: &DbResult, current: (Option<usize>, usize)) {
     ui.ctx().copy_text(text);
 }
 
-/// A refused statement: the cross, one sentence of ours, then the server's
-/// own words in mono, selectable. Those words are data: never translated.
-fn banner(ui: &mut Ui, theme: &Theme, source: &DbSource, code: &str, detail: Option<&str>) {
+/// A refused statement: one sentence of ours, then the server's own words.
+fn refused(ui: &mut Ui, theme: &Theme, source: &DbSource, code: &str, detail: Option<&str>) {
     let sentence = match code {
         codes::DB_QUERY_FAILED => strings::query_failed(source),
         codes::DB_TIMEOUT => strings::DB_QUERY_TIMEOUT.to_owned(),
         code => strings::error_text(code),
     };
-    let pad = theme.space.s4;
-    Frame::new()
-        .fill(theme.color.error_bg)
-        .stroke(Stroke::new(theme.size.border, theme.color.error_line))
-        .corner_radius(CornerRadius::same(theme.radius.lg))
-        .inner_margin(Margin::same(whole(pad)))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = theme.space.s2;
-            ui.horizontal(|ui| {
-                ui.add(Glyph::new(Icon::Cross).color(theme.color.error));
-                ui.add(Text::new(
-                    &sentence,
-                    theme.text.body_strong,
-                    theme.color.ink,
-                ));
-            });
-            if let Some(words) = detail {
-                let words = RichText::new(words)
-                    .font(theme.text.mono_sm.font_id())
-                    .color(theme.color.ink);
-                ui.add(Label::new(words).wrap().selectable(true));
-            }
-        });
-}
-
-/// A margin is whole points.
-fn whole(points: f32) -> i8 {
-    points.round() as i8
+    pane::banner(ui, theme, &sentence, detail);
 }
 
 /// What Run sends: the selection when there is one, else the statement at

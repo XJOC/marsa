@@ -6,6 +6,7 @@
 //! `strings::NAME` whatever file the text lives in.
 
 mod db_browser;
+mod db_keys;
 mod dumps;
 mod errors;
 mod home;
@@ -20,6 +21,7 @@ mod tray;
 pub(crate) mod tests;
 
 pub use db_browser::*;
+pub use db_keys::*;
 pub use dumps::*;
 pub use errors::*;
 pub use home::*;

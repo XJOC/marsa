@@ -153,6 +153,8 @@ pub enum Action {
     ReadDbSources,
     /// What the user did on the open table of Databases.
     Db(super::DbAction),
+    /// What the user did on Valkey's keys.
+    Keys(super::KeysAction),
     /// A sidebar item, or the status at its bottom.
     Navigate(Route),
     /// The fold button of the sidebar: hide or show the labels.

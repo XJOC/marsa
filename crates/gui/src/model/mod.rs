@@ -33,7 +33,8 @@ mod sites;
 mod workers;
 
 pub use db_browser::{
-    DbAction, DbBrowserState, DbScreen, DbTab, DbView, OpenTable, PaneValue, QueryRun, QueryState,
+    DbAction, DbBrowserState, DbScreen, DbTab, DbView, KEY_LIST_LIMIT, KeyBrowser, KeyList,
+    KeyShape, KeyValue, KeysAction, OpenKey, OpenTable, PaneValue, QueryRun, QueryState, ReadError,
 };
 pub use dumps::DumpsState;
 use installs::Install;
@@ -318,6 +319,9 @@ impl Model {
             Action::Db(DbAction::Copy) => {
                 self.db_copy_text().map_or(Effect::None, Effect::CopyText)
             }
+            Action::Keys(KeysAction::Copy) => self
+                .db_key_copy_text()
+                .map_or(Effect::None, Effect::CopyText),
             action => self.change(action).or_else(|| self.next_command()).into(),
         }
     }
@@ -504,6 +508,7 @@ impl Model {
             }
             Action::ReadDbSources => self.open_databases(),
             Action::Db(action) => self.db_action(action),
+            Action::Keys(action) => self.keys_action(action),
             Action::ChooseMail(id) => self.choose_mail(id),
             Action::ChooseDump(id) => {
                 self.choose_dump(id);

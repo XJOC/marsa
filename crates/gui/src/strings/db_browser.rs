@@ -98,7 +98,7 @@ pub fn rows_about(rows: u64) -> String {
 }
 
 /// "12,408".
-fn grouped(number: u64) -> String {
+pub(super) fn grouped(number: u64) -> String {
     let digits = number.to_string();
     let mut grouped = String::new();
     for (at, digit) in digits.chars().enumerate() {

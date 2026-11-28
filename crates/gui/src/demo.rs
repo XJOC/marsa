@@ -24,6 +24,7 @@ use crate::model::{
 };
 
 mod databases;
+mod db_keys;
 mod dumps;
 mod mail;
 mod site_log;
@@ -119,6 +120,14 @@ pub enum Demo {
     DatabasesSql,
     DatabasesSqlRunning,
     DatabasesSqlRefused,
+    /// Databases on Valkey: a hash with a field's value open; a string; a
+    /// long list; no keys; a key that is gone; Valkey stopped.
+    Keys,
+    KeysString,
+    KeysList,
+    KeysEmpty,
+    KeysGone,
+    KeysStopped,
     /// The same as `Ok`, with six dumps, four of them new, the newest shown.
     Dumps,
     /// `Dumps` with the capture on and nothing caught yet.
@@ -179,6 +188,12 @@ fn parse(name: &str) -> Option<Demo> {
         "databases-sql" => Demo::DatabasesSql,
         "databases-sql-running" => Demo::DatabasesSqlRunning,
         "databases-sql-refused" => Demo::DatabasesSqlRefused,
+        "keys" => Demo::Keys,
+        "keys-string" => Demo::KeysString,
+        "keys-list" => Demo::KeysList,
+        "keys-empty" => Demo::KeysEmpty,
+        "keys-gone" => Demo::KeysGone,
+        "keys-stopped" => Demo::KeysStopped,
         "confirm-delete-mail" => Demo::ConfirmDeleteMail,
         "dumps" => Demo::Dumps,
         "dumps-empty" => Demo::DumpsEmpty,
@@ -293,6 +308,17 @@ pub fn fill(model: &mut Model, demo: Demo) {
             | Demo::DatabasesSqlRefused
     ) {
         databases::fill(model, demo);
+    }
+    if matches!(
+        demo,
+        Demo::Keys
+            | Demo::KeysString
+            | Demo::KeysList
+            | Demo::KeysEmpty
+            | Demo::KeysGone
+            | Demo::KeysStopped
+    ) {
+        db_keys::fill(model, demo);
     }
     if matches!(
         demo,
