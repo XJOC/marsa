@@ -221,6 +221,7 @@ impl Model {
             return None;
         }
         db.open = Some(OpenTable::closed(table));
+        db.table_id = None;
         self.read_db_rows(0, true)
     }
 
@@ -362,9 +363,16 @@ impl Model {
                     }
                 }
             }
-            DbUpdate::Table { id, result } if db.table_id == Some(id) => {
+            DbUpdate::Table {
+                id,
+                source,
+                table,
+                result,
+            } if db.table_id == Some(id) => {
                 db.table_id = None;
-                let Some(open) = db.open.as_mut() else {
+                let chosen = db.chosen.as_ref() == Some(&source);
+                let open = db.open.as_mut().filter(|open| open.table == table);
+                let Some(open) = open.filter(|_| chosen) else {
                     return;
                 };
                 match result {
