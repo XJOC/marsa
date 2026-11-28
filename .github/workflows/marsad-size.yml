@@ -12,6 +12,7 @@ on:
       - Cargo.toml
       - crates/*/Cargo.toml
       - crates/app/src/daemon/db_browser/**
+      - crates/core/src/db_browser/**
       - tools/e2e/db-browser.sh
       - tools/e2e/api.sh
       - .github/workflows/marsad-size.yml

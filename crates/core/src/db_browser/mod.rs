@@ -10,6 +10,7 @@
 
 mod catalog;
 mod kind;
+pub mod resp;
 mod split;
 mod sql;
 
