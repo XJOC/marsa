@@ -94,24 +94,11 @@ pub fn file_id(meta: &fs::Metadata) -> Option<(u64, u64)> {
     Some((meta.dev(), meta.ino()))
 }
 
-/// Windows: std gives no stable file id, so the caller decides otherwise.
+/// Windows: std gives no stable file id from a path's metadata, so the
+/// caller decides otherwise. An open file's id is
+/// `platform::files::identity`.
 #[cfg(not(unix))]
 pub fn file_id(_meta: &fs::Metadata) -> Option<(u64, u64)> {
-    None
-}
-
-/// How many names the file has (hard links), so a reader can refuse a file
-/// that is also reachable from elsewhere.
-// `#[cfg(unix)]` outside `platform`: std gives the link count on Unix only.
-#[cfg(unix)]
-pub fn link_count(meta: &fs::Metadata) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt as _;
-    Some(meta.nlink())
-}
-
-/// Windows: std gives no link count.
-#[cfg(not(unix))]
-pub fn link_count(_meta: &fs::Metadata) -> Option<u64> {
     None
 }
 

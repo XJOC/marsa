@@ -8,7 +8,9 @@
 //! - the file must be a regular file, not a link, when looked at by path,
 //!   and the same file once open (device and inode on Unix; on Windows the
 //!   open does not follow a link, `platform::files::open_no_follow`), with
-//!   one name only on Unix (no hard link to a file elsewhere);
+//!   one name only (no hard link to a file elsewhere), from the open
+//!   handle on every system. A file whose names cannot be counted is
+//!   refused;
 //! - the folder is checked again after the open, so a swap of the folder in
 //!   between is seen too.
 //!
@@ -27,8 +29,8 @@ use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use marsa_core::codes;
-use marsa_core::fs::{file_id, link_count};
-use marsa_core::platform::files::open_no_follow;
+use marsa_core::fs::file_id;
+use marsa_core::platform::files::{identity, open_no_follow};
 use marsa_core::sitelog::{self, LineSplitter, MAX_TAIL_BYTES, MAX_TAIL_LINES};
 use marsa_core::types::{SiteLog, SiteLogLine};
 
@@ -144,8 +146,9 @@ impl LogDir {
         Ok(newest.map(str::to_owned))
     }
 
-    /// Opens the log `name` with the checks of the module. `None`: it is gone.
-    fn open(&self, name: &str) -> Result<Option<(File, Metadata)>, LogError> {
+    /// Opens the log `name` with the checks of the module, and gives the
+    /// open file's id. `None`: it is gone.
+    fn open(&self, name: &str) -> Result<Option<Opened>, LogError> {
         let path = self.dir.join(name);
         let before = match fs::symlink_metadata(&path) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -163,10 +166,16 @@ impl LogDir {
             other => other.map_err(LogError::Io)?,
         };
         let opened = file.metadata().map_err(LogError::Io)?;
-        if !opened.is_file() || file_id(&before) != file_id(&opened) {
+        let Ok(who) = identity(&file) else {
+            return Err(LogError::Unsafe("the log file's names cannot be counted"));
+        };
+        // The path's look has no id on Windows, where the open itself does
+        // not follow a link: `is_file` on the open file sees one.
+        let swapped = file_id(&before).is_some_and(|id| id != who.id);
+        if !opened.is_file() || swapped {
             return Err(LogError::Unsafe("the log file changed while it was opened"));
         }
-        if link_count(&opened).is_some_and(|names| names > 1) {
+        if who.links > 1 {
             return Err(LogError::Unsafe(
                 "the log file has another name (a hard link)",
             ));
@@ -174,16 +183,29 @@ impl LogDir {
         if !self.check()? {
             return Ok(None);
         }
-        Ok(Some((file, opened)))
+        Ok(Some(Opened {
+            file,
+            meta: opened,
+            id: who.id,
+        }))
     }
+}
+
+/// A log file that passed the checks of [`LogDir::open`].
+#[derive(Debug)]
+struct Opened {
+    file: File,
+    meta: Metadata,
+    /// From the open handle ([`identity`]), on every system.
+    id: (u64, u64),
 }
 
 /// Where a reader is in one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Place {
     name: String,
-    /// Device and inode on Unix; `None` on Windows.
-    id: Option<(u64, u64)>,
+    /// [`Opened::id`].
+    id: (u64, u64),
     /// Where the next read starts.
     pos: u64,
 }
@@ -230,7 +252,7 @@ impl Tail {
             Some(name) => tail.dir.open(&name)?.map(|opened| (name, opened)),
             None => None,
         };
-        let Some((name, (mut file, meta))) = opened else {
+        let Some((name, Opened { mut file, meta, id })) = opened else {
             return Ok((log, tail));
         };
         let len = meta.len();
@@ -249,7 +271,7 @@ impl Tail {
         }
         tail.current = Some(Place {
             name: name.clone(),
-            id: file_id(&meta),
+            id,
             pos: at + read.bytes,
         });
         log.file = Some(name);
@@ -591,15 +613,6 @@ mod tests {
         }
 
         #[test]
-        fn a_hard_link_is_refused() {
-            let (temp, root) = site();
-            let secret = temp.path().join("secret");
-            fs::write(&secret, "secret\n").unwrap();
-            fs::hard_link(&secret, logs(&root).join("laravel.log")).unwrap();
-            assert_eq!(unsafe_start(&root), codes::SITE_LOG_UNSAFE);
-        }
-
-        #[test]
         fn a_file_that_is_not_regular_is_refused_without_an_open() {
             let (_temp, root) = site();
             // A socket: not a regular file, made with std only. A FIFO takes
@@ -616,6 +629,22 @@ mod tests {
             symlink(logs(&root), logs(&root)).unwrap();
             assert_eq!(unsafe_start(&root), codes::SITE_LOG_UNSAFE);
         }
+    }
+
+    /// On every system: a hard link needs no rights on NTFS either, and the
+    /// open does not tell it from the file's only name.
+    #[test]
+    fn a_hard_link_is_refused() {
+        let (temp, root) = site();
+        let secret = temp.path().join("secret");
+        fs::write(&secret, "secret\n").unwrap();
+        fs::hard_link(&secret, logs(&root).join("laravel.log")).unwrap();
+        assert_eq!(unsafe_start(&root), codes::SITE_LOG_UNSAFE);
+        // The stream refuses it too, after a start that found no file.
+        let (_temp, root) = site();
+        let (_, mut tail) = Tail::start(&root).unwrap();
+        fs::hard_link(&secret, logs(&root).join("laravel.log")).unwrap();
+        assert!(matches!(tail.poll(), Err(LogError::Unsafe(_))));
     }
 
     // Windows links need Developer Mode or an administrator: each test
