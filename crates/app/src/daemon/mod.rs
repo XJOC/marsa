@@ -8,6 +8,7 @@ pub mod http;
 pub mod jobs;
 pub mod log_filter;
 pub mod mail;
+pub mod panic_log;
 pub mod runtimes;
 pub mod services;
 pub mod setup;
