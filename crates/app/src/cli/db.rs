@@ -1,16 +1,21 @@
 //! `marsa db`: the database browser on the command line (ADR 0028), through
 //! the same routes as the window. Read-only: a statement that changes data
-//! is refused by the database. The CLI never connects to a database itself.
+//! is refused by the database, and Valkey's keys are only read ([`keys`]).
+//! The CLI never connects to a database itself.
+
+mod keys;
 
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use marsa_core::client::ClientError;
+use marsa_core::codes;
+use marsa_core::databases::ServerKind;
 use marsa_core::db_browser::PAGE_ROWS;
 use marsa_core::types::{
-    DbCell, DbPage, DbQueryRequest, DbResult, DbRowsRequest, DbServer, DbSort, DbSource, DbSources,
-    DbTableRef, DbTables, ServiceState,
+    DbCell, DbKeyKind, DbKeyRequest, DbKeysRequest, DbPage, DbQueryRequest, DbResult,
+    DbRowsRequest, DbServer, DbSort, DbSource, DbSources, DbTableRef, DbTables, ServiceState,
 };
 
 use super::Failure;
@@ -47,6 +52,28 @@ pub enum DbCommand {
         #[arg(long, default_value = "public")]
         schema: String,
     },
+    /// List the keys of a Valkey database.
+    Keys {
+        /// Valkey's database, such as valkey/1.
+        #[arg(default_value = "valkey/0")]
+        database: String,
+        /// Only the keys this Valkey pattern matches, such as 'laravel*'.
+        #[arg(long = "match", value_name = "PATTERN")]
+        pattern: Option<String>,
+        /// Only the keys of this type: string, hash, list, set, zset, or
+        /// stream.
+        #[arg(long = "type", value_name = "TYPE", value_parser = keys::kind)]
+        kind: Option<DbKeyKind>,
+        /// Go on from where the page before stopped.
+        #[arg(long, default_value_t = 0)]
+        cursor: u64,
+    },
+    /// Print one key's type, time to live, and value.
+    Key {
+        /// Valkey's database, such as valkey/0.
+        database: String,
+        key: String,
+    },
     /// Run one statement and print its rows. Statements that change data are
     /// refused: the browser is read-only.
     Query {
@@ -64,7 +91,16 @@ pub async fn run(args: &DbArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
         text.parse::<DbSource>()
             .map_err(|err| Failure::new(err.code(), data_dir, None))
     };
+    let database = |text: &str| {
+        keys::database(text).ok_or_else(|| Failure::new(codes::DB_SOURCE_INVALID, data_dir, None))
+    };
     let client = connect(data_dir).await?;
+    // The service an error of Valkey names.
+    let service = matches!(
+        args.command,
+        Some(DbCommand::Keys { .. } | DbCommand::Key { .. })
+    )
+    .then(|| ServerKind::Valkey.id());
     let text = match &args.command {
         None => client
             .db_sources()
@@ -112,6 +148,30 @@ pub async fn run(args: &DbArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
                 .await
                 .map(|page| render_page(&page))
         }
+        Some(DbCommand::Keys {
+            database: text,
+            pattern,
+            kind,
+            cursor,
+        }) => {
+            let request = DbKeysRequest {
+                db: database(text)?,
+                pattern: pattern.clone(),
+                kind: *kind,
+                cursor: *cursor,
+            };
+            keys::list(&client, &request).await
+        }
+        Some(DbCommand::Key {
+            database: text,
+            key,
+        }) => {
+            let request = DbKeyRequest {
+                db: database(text)?,
+                key: key.clone(),
+            };
+            keys::value(&client, &request).await
+        }
         Some(DbCommand::Query {
             source: text,
             sql,
@@ -133,14 +193,14 @@ pub async fn run(args: &DbArgs, data_dir: &Path) -> Result<ExitCode, Failure> {
             print!("{text}");
             Ok(ExitCode::SUCCESS)
         }
-        Err(err) => Ok(report(&err, data_dir)),
+        Err(err) => Ok(report(&err, data_dir, service)),
     }
 }
 
 /// The usual error line, then what the database said, as it said it: a
 /// server's message is data, never translated.
-fn report(err: &ClientError, data_dir: &Path) -> ExitCode {
-    let code = failure(err, data_dir, None).report();
+fn report(err: &ClientError, data_dir: &Path, service: Option<&str>) -> ExitCode {
+    let code = failure(err, data_dir, service).report();
     if let Some(detail) = err.detail() {
         eprintln!("{}", printable_multiline(detail));
     }
@@ -153,12 +213,7 @@ fn render_sources(sources: &DbSources) -> String {
         let name = format!("{} {}", info.server.kind().name(), info.version)
             .trim()
             .to_owned();
-        let state = match (&info.state, &info.problem) {
-            (_, Some(problem)) => strings::message(problem, &strings::Details::default()),
-            (ServiceState::Running, None) => "running".to_owned(),
-            (ServiceState::Failed { .. }, None) => "failed".to_owned(),
-            _ => "stopped".to_owned(),
-        };
+        let state = server_state(&info.state, info.problem.as_deref());
         let id = info.server.kind().id();
         if info.databases.is_empty() {
             rows.push([id.to_owned(), name.clone(), state.clone()]);
@@ -166,6 +221,21 @@ fn render_sources(sources: &DbSources) -> String {
         for database in &info.databases {
             let source = format!("{id}/{}", printable(&database.name));
             rows.push([source, name.clone(), state.clone()]);
+        }
+    }
+    if let Some(info) = &sources.valkey {
+        let id = ServerKind::Valkey.id();
+        let name = format!("{} {}", ServerKind::Valkey.name(), info.version)
+            .trim()
+            .to_owned();
+        let state = server_state(&info.state, info.problem.as_deref());
+        if info.databases.is_empty() {
+            rows.push([id.to_owned(), name.clone(), state.clone()]);
+        }
+        for database in &info.databases {
+            let source = format!("{id}/{}", database.db);
+            let held = strings::db_state_keys(&state, database.keys);
+            rows.push([source, name.clone(), held]);
         }
     }
     for file in &sources.files {
@@ -176,6 +246,16 @@ fn render_sources(sources: &DbSources) -> String {
         return strings::DB_NONE.to_owned();
     }
     columns(&rows) + strings::DB_SOURCES_HINT
+}
+
+/// A server's state in `marsa db`, or why it could not be read.
+fn server_state(state: &ServiceState, problem: Option<&str>) -> String {
+    match (state, problem) {
+        (_, Some(problem)) => strings::message(problem, &strings::Details::default()),
+        (ServiceState::Running, None) => "running".to_owned(),
+        (ServiceState::Failed { .. }, None) => "failed".to_owned(),
+        _ => "stopped".to_owned(),
+    }
 }
 
 fn render_tables(tables: &DbTables) -> String {
