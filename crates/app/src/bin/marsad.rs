@@ -15,6 +15,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use marsa::daemon::http::server::{self, AlreadyRunning};
 use marsa::daemon::log_filter::{log_filter, no_driver_log};
+use marsa::daemon::panic_log::log_panics;
 use marsa::daemon::services::supervisor::{LOG_FILE_LIMIT, LogFile};
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -88,7 +89,8 @@ fn data_dir(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 
 /// Logs to `logs/marsad.log`, and to stderr in debug builds. `MARSA_LOG` sets
 /// the level (default `info`). Past 10 MiB the file moves to `marsad.log.1`:
-/// any web page can make the daemon log rejected requests without end.
+/// any web page can make the daemon log rejected requests without end. A
+/// panic is logged there too.
 fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
     let logs = DataDir::new(data_dir).logs();
     fs::create_dir_all(&logs).with_context(|| format!("cannot create {}", logs.display()))?;
@@ -107,5 +109,7 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
         .with(to_file)
         .with(to_stderr)
         .try_init()
-        .context("cannot set up logging")
+        .context("cannot set up logging")?;
+    log_panics();
+    Ok(())
 }
