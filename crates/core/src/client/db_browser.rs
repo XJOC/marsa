@@ -6,8 +6,9 @@ use reqwest::Method;
 use super::{ClientError, DaemonClient, REQUEST_TIMEOUT};
 use crate::codes;
 use crate::types::{
-    DbCellRequest, DbPage, DbQueryRequest, DbResult, DbRowsRequest, DbSource, DbSources, DbTable,
-    DbTableRef, DbTableRequest, DbTables, DbTablesRequest, DbValue, JobOutcome,
+    DbCellRequest, DbKeyDetail, DbKeyRequest, DbKeys, DbKeysRequest, DbPage, DbQueryRequest,
+    DbResult, DbRowsRequest, DbSource, DbSources, DbTable, DbTableRef, DbTableRequest, DbTables,
+    DbTablesRequest, DbValue, JobOutcome,
 };
 
 impl DaemonClient {
@@ -75,6 +76,30 @@ impl DaemonClient {
     /// key or the table has none.
     pub async fn db_cell(&self, request: &DbCellRequest) -> Result<DbValue, ClientError> {
         self.call_with(Method::POST, &["v1", "db", "cell"], request)
+            .await
+    }
+
+    /// `POST /v1/db/keys`: some keys of a Valkey database.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `db_server_not_running` (409),
+    /// `db_source_invalid` (400) for a database Valkey does not have,
+    /// `db_pattern_too_long` (400), `db_sign_in_failed` and `db_unavailable`
+    /// (502), and `db_timeout` (504).
+    pub async fn db_keys(&self, request: &DbKeysRequest) -> Result<DbKeys, ClientError> {
+        self.call_with(Method::POST, &["v1", "db", "keys"], request)
+            .await
+    }
+
+    /// `POST /v1/db/key`: the type, the time to live, and the start of one
+    /// key's value.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::db_keys`]; `db_key_not_found` (404) when the key is gone.
+    pub async fn db_key(&self, request: &DbKeyRequest) -> Result<DbKeyDetail, ClientError> {
+        self.call_with(Method::POST, &["v1", "db", "key"], request)
             .await
     }
 

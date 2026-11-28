@@ -417,6 +417,8 @@ pub(super) fn known(code: &str, d: &Details<'_>) -> Option<String> {
         "db_query_failed" => "The database did not run the statement.".into(),
         "db_row_not_found" => "No row has that key now. Refresh the rows and try again.".into(),
         "db_query_cancelled" => "The statement was cancelled.".into(),
+        "db_key_not_found" => "That key is gone. It may have expired.".into(),
+        "db_pattern_too_long" => "The search pattern is longer than 1 KB.".into(),
         "db_busy" => "Another statement still runs on this database. Wait for it to end, or \
              cancel it."
             .into(),
