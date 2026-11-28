@@ -31,6 +31,12 @@ pub struct ServiceSpec {
     pub cwd: Option<PathBuf>,
     pub restart: RestartPolicy,
     pub stop: StopMethod,
+    /// On macOS and Linux the process leads a process group of its own, and
+    /// each signal of the stop, and the last kill, go to the whole group: a
+    /// worker's `schedule:run`, and the commands that one starts, end with
+    /// it. A server keeps the daemon's group: it stops its own children.
+    /// Nothing changes on Windows, where the daemon's Job Object ends them.
+    pub own_group: bool,
 }
 
 /// A Unix signal that the daemon sends with `/bin/kill`

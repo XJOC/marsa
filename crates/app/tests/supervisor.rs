@@ -94,6 +94,27 @@ fn fake_service() {
         "kv" | "kv-mute" | "kv-refuse" => tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(serve_one_request(&mode)),
+        // Starts the `hang` fake as its own child, which ignores SIGTERM, and
+        // prints its pid: `schedule:work` with a `schedule:run` that does not
+        // end at once. `parent` itself ends at SIGTERM, `parent-deaf` only
+        // at a kill.
+        #[cfg(unix)]
+        "parent" | "parent-deaf" => tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use tokio::signal::unix::{SignalKind, signal};
+            let _term = (mode == "parent-deaf")
+                .then(|| signal(SignalKind::terminate()).expect("a SIGTERM handler"));
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["fake_service", "--exact", "--nocapture"])
+                .env(FAKE, "hang")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("the child starts");
+            println!("fake child {}", child.id().expect("it runs"));
+            // The child never ends by itself: only a stop ends either.
+            let _ = child.wait().await;
+            std::future::pending::<()>().await;
+        }),
         // Exits when the file `stop` appears in `MARSA_FAKE_DIR`, as a server
         // that its stop program asked to stop. Nothing else ends it but a
         // kill, on every system; after two minutes it ends by itself, so a
@@ -224,6 +245,7 @@ fn spec(mode: &str, restart: RestartPolicy, stop: StopMethod) -> ServiceSpec {
         cwd: None,
         restart,
         stop,
+        own_group: false,
     }
 }
 
@@ -417,6 +439,7 @@ fn a_relative_program_is_rejected() {
         cwd: None,
         restart: RestartPolicy::Never,
         stop: StopMethod::term(GRACE),
+        own_group: false,
     };
     let err = Supervisor::spawn(spec, tx, std::path::Path::new("logs")).unwrap_err();
     assert_eq!(err.code(), "program_not_absolute");
@@ -442,6 +465,70 @@ async fn ready(handle: &ServiceHandle) {
     tokio::time::timeout(WAIT, ready)
         .await
         .expect("the fake started");
+}
+
+/// The pid in the fake's line `fake child <pid>`.
+#[cfg(unix)]
+async fn fake_child(handle: &ServiceHandle) -> u32 {
+    let child = async {
+        loop {
+            let pid = handle.recent_logs().iter().find_map(|line| {
+                let pid = line.text.strip_prefix("fake child ")?;
+                pid.parse().ok()
+            });
+            if let Some(pid) = pid {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(WAIT, child)
+        .await
+        .expect("the fake started its child")
+}
+
+/// Kills the process at the end of a test that failed before it was gone.
+#[cfg(unix)]
+struct KillOnDrop(u32);
+
+#[cfg(unix)]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-KILL", &self.0.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// A service that leads its own group: the stop ends the child it started
+/// too, which ignores SIGTERM, whether the service itself ends at SIGTERM
+/// (the rest of the group gets SIGKILL after the wait) or only at the kill
+/// (which goes to the group).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_ends_the_whole_group_of_a_service_that_leads_one() {
+    use marsa_core::orphan::Liveness;
+    use marsa_core::platform::process;
+    for mode in ["parent", "parent-deaf"] {
+        let spec = ServiceSpec {
+            own_group: true,
+            ..spec(mode, RestartPolicy::Never, StopMethod::term(GRACE))
+        };
+        let (handle, _rx, _logs) = start_spec(spec);
+        let child = fake_child(&handle).await;
+        let _kill = KillOnDrop(child);
+        let pgid = handle.status().pid.expect("the fake runs");
+        handle.stop().await.expect("no panic");
+        let gone = async {
+            while process::identity(child).await != Liveness::Gone {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        let gone = tokio::time::timeout(Duration::from_secs(10), gone).await;
+        assert!(gone.is_ok(), "{mode}: the child still runs");
+        assert!(!process::group_exists(pgid).await, "{mode}");
+    }
 }
 
 /// PostgreSQL's ladder (ADR 0023): SIGINT, then SIGQUIT, then a kill.

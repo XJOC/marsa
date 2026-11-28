@@ -154,6 +154,7 @@ pub fn fpm_spec(program: PathBuf, files: &PhpFiles) -> ServiceSpec {
         cwd: None,
         restart: RESTART,
         stop: StopMethod::term(STOP_GRACE),
+        own_group: false,
     }
 }
 

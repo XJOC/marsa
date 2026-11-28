@@ -29,6 +29,10 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use group::Group;
+
+mod group;
+
 /// A longer line is split, so a line without `\n` cannot grow without limit.
 const MAX_LINE_BYTES: u64 = 8 * 1024;
 
@@ -398,7 +402,15 @@ async fn run(
 /// its limit for the exit. A step whose asking fails goes on to the next at
 /// once. After the last step, a kill (`TerminateProcess` on Windows).
 /// Windows sends no signals, so there a signal step is skipped.
+///
+/// With `own_group`, each signal and the kill go to the child's whole group
+/// ([`Group`]), and what is left of it once the child has exited gets the
+/// rest of that step's wait, then SIGKILL.
 async fn stop(child: &mut Child, spec: &ServiceSpec, shared: &Shared) {
+    let group = child
+        .id()
+        .filter(|_| spec.own_group)
+        .map(|pid| Group::led_by(pid, spec.id));
     // A `Send` step goes to the port that was fixed at the spawn. Another
     // program could take it in the instant between our child's start and its
     // bind; the check before the start and the readiness probe make that
@@ -409,8 +421,9 @@ async fn stop(child: &mut Child, spec: &ServiceSpec, shared: &Shared) {
         let Some(pid) = child.id() else {
             break;
         };
+        let deadline = tokio::time::Instant::now() + step.wait;
         let stopped = match &step.action {
-            StopAction::Signal(signal) => match process::send_signal(pid, *signal).await {
+            StopAction::Signal(signal) => match group::signal_child(pid, group, *signal).await {
                 Ok(()) => Asked::Yes(tokio::time::timeout(step.wait, child.wait()).await.is_ok()),
                 // Windows: no signals. The next step comes, then the kill.
                 Err(err) if err.kind() == io::ErrorKind::Unsupported => Asked::No,
@@ -423,7 +436,12 @@ async fn stop(child: &mut Child, spec: &ServiceSpec, shared: &Shared) {
             StopAction::Run(command) => run_command(child, command, step.wait, shared).await,
         };
         match stopped {
-            Asked::Yes(true) => return,
+            Asked::Yes(true) => {
+                if let Some(group) = group {
+                    group.end_after_leader(deadline).await;
+                }
+                return;
+            }
             Asked::Yes(false) => {
                 let name = step.action.name();
                 warn!(service = %spec.id, wait = ?step.wait, "still running after {name}");
@@ -431,8 +449,15 @@ async fn stop(child: &mut Child, spec: &ServiceSpec, shared: &Shared) {
             Asked::No => {}
         }
     }
+    // The group first, while the child is not yet waited for: `kill` waits.
+    if let (Some(group), Some(_)) = (group, child.id()) {
+        group.kill_with_leader().await;
+    }
     if let Err(err) = child.kill().await {
         warn!(service = %spec.id, %err, "cannot kill the process");
+    }
+    if let Some(group) = group {
+        group.end_after_leader(tokio::time::Instant::now()).await;
     }
 }
 
@@ -601,9 +626,12 @@ fn command(spec: &ServiceSpec) -> Command {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // ADR 0009: a panic or a return from `main` kills the child too. No
-        // `process_group(0)`: a Ctrl+C in the terminal must reach the child.
+        // ADR 0009: a panic or a return from `main` kills the child too.
         .kill_on_drop(true);
+    // Only where asked: a Ctrl+C in `marsad`'s terminal must reach the rest.
+    if spec.own_group {
+        process::own_group(&mut cmd);
+    }
     for name in &spec.env_remove {
         cmd.env_remove(name);
     }
