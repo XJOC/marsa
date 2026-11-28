@@ -5,7 +5,30 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::DbCell;
+use super::{DbCell, ServiceState};
+
+/// Marsa's Valkey in `DbSources`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbValkeyInfo {
+    /// The installed version, such as `8.1.11`.
+    pub version: String,
+    #[serde(flatten)]
+    pub state: ServiceState,
+    /// The databases that hold keys, and always database 0. Empty unless it
+    /// runs.
+    pub databases: Vec<DbValkeyDatabase>,
+    /// An error code when it runs but could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+/// One database of Valkey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbValkeyDatabase {
+    pub db: u8,
+    /// The keys it holds.
+    pub keys: u64,
+}
 
 /// The types of key Valkey filters a search by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

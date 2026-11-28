@@ -34,6 +34,7 @@ fn sources() -> DbSources {
             site: "blog".into(),
             path: "database/database.sqlite".into(),
         }],
+        valkey: None,
     }
 }
 
@@ -148,6 +149,7 @@ fn a_stopped_server_and_a_refused_sign_in_say_so() {
     let stopped = DbSources {
         servers: vec![server(DbServer::Postgres, ServiceState::Stopped, &[])],
         files: Vec::new(),
+        valkey: None,
     };
     assert!(opened(&mut model, stopped).is_none());
     assert_eq!(
@@ -160,6 +162,7 @@ fn a_stopped_server_and_a_refused_sign_in_say_so() {
     let starting = DbSources {
         servers: vec![server(DbServer::Postgres, ServiceState::Starting, &[])],
         files: Vec::new(),
+        valkey: None,
     };
     opened(&mut model, starting);
     assert_eq!(model.session.db.screen(), DbScreen::Loading);
@@ -170,6 +173,7 @@ fn a_stopped_server_and_a_refused_sign_in_say_so() {
     let sources = DbSources {
         servers: vec![refused],
         files: Vec::new(),
+        valkey: None,
     };
     opened(&mut model, sources);
     assert_eq!(

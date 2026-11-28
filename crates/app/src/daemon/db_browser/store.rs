@@ -31,20 +31,29 @@ pub(super) type Key = (DbServer, Option<String>);
 /// shared data (AGENTS.md section 6).
 pub(super) type Slot<C> = Arc<tokio::sync::Mutex<Option<C>>>;
 
-pub(super) struct Store<C> {
-    inner: Mutex<Inner<C>>,
+/// `K` names a source: a server's [`Key`], or `()` for Valkey's one
+/// connection.
+pub(super) struct Store<C, K = Key> {
+    inner: Mutex<Inner<C, K>>,
     /// How long a connection stays open with no request.
     idle: Duration,
 }
 
-struct Inner<C> {
+struct Inner<C, K> {
     /// Most recently used last.
-    slots: Vec<(Key, Slot<C>, Instant)>,
+    slots: Vec<(K, Slot<C>, Instant)>,
     /// A task that closes idle connections runs: one while any slot is open.
     reaping: bool,
 }
 
 impl<C: Send + 'static> Store<C> {
+    /// Closes every source of `server`.
+    pub(super) fn close_server(&self, server: DbServer) {
+        self.lock().slots.retain(|((s, _), _, _)| *s != server);
+    }
+}
+
+impl<C: Send + 'static, K: PartialEq + Clone + Send + 'static> Store<C, K> {
     pub(super) fn new(idle: Duration) -> Self {
         Self {
             inner: Mutex::new(Inner {
@@ -59,7 +68,7 @@ impl<C: Send + 'static> Store<C> {
     /// recently used source closes when more than [`MAX_OPEN`] would be
     /// open. `true` with it when a task to close idle connections must
     /// start ([`Self::spawn_reaper`]).
-    pub(super) fn slot(&self, key: &Key) -> (Slot<C>, bool) {
+    pub(super) fn slot(&self, key: &K) -> (Slot<C>, bool) {
         let mut inner = self.lock();
         let now = Instant::now();
         let slot = match inner.slots.iter().position(|(k, _, _)| k == key) {
@@ -82,11 +91,6 @@ impl<C: Send + 'static> Store<C> {
         (slot, start_reaper)
     }
 
-    /// Closes every source of `server`.
-    pub(super) fn close_server(&self, server: DbServer) {
-        self.lock().slots.retain(|((s, _), _, _)| *s != server);
-    }
-
     pub(super) fn close_all(&self) {
         self.lock().slots.clear();
     }
@@ -105,7 +109,7 @@ impl<C: Send + 'static> Store<C> {
     }
 
     #[cfg(test)]
-    pub(super) fn open(&self) -> Vec<Key> {
+    pub(super) fn open(&self) -> Vec<K> {
         self.lock()
             .slots
             .iter()
@@ -138,7 +142,7 @@ impl<C: Send + 'static> Store<C> {
 
     /// A panic while the lock was held leaves the list whole: each change is
     /// one `Vec` call.
-    fn lock(&self) -> MutexGuard<'_, Inner<C>> {
+    fn lock(&self) -> MutexGuard<'_, Inner<C, K>> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

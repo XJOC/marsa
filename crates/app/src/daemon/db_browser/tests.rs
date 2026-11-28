@@ -15,9 +15,11 @@ use super::{servers, sqlite};
 use crate::daemon::http::test_router::TestRouter;
 use crate::daemon::state::Daemon;
 
-const ROUTES: [(&str, &str); 3] = [
+const ROUTES: [(&str, &str); 5] = [
     ("GET", "/v1/db/sources"),
     ("POST", "/v1/db/tables"),
+    ("POST", "/v1/db/keys"),
+    ("POST", "/v1/db/key"),
     ("POST", "/v1/db/close"),
 ];
 

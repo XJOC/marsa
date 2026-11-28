@@ -118,6 +118,9 @@ pub struct DbSources {
     pub servers: Vec<DbServerInfo>,
     /// The sites that have a SQLite file, by site name.
     pub files: Vec<DbSiteFile>,
+    /// Marsa's Valkey, when it is installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valkey: Option<super::DbValkeyInfo>,
 }
 
 /// One installed server in [`DbSources`].
@@ -606,6 +609,7 @@ mod db_browser_tests {
                 site: "blog".into(),
                 path: "database/database.sqlite".into(),
             }],
+            valkey: None,
         };
         round_trip(
             &sources,
