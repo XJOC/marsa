@@ -2,11 +2,10 @@
 //! started by the caller (every 500 ms while a client listens), so nothing
 //! runs without a reader.
 
-use marsa_core::fs::file_id;
 use marsa_core::sitelog::{LineSplitter, MAX_STEP_BYTES, MAX_STEP_LINES};
 use marsa_core::types::SiteLogLine;
 
-use super::{Lines, LogError, Place, Tail, read_into};
+use super::{Lines, LogError, Opened, Place, Tail, read_into};
 
 /// How many other files a stream remembers where it stopped in, so a project
 /// that writes two logs at once (`single` and `daily` in one `stack`) is not
@@ -44,10 +43,9 @@ impl Tail {
         let Some(name) = self.dir.newest()? else {
             return Ok(step);
         };
-        let Some((mut file, meta)) = self.dir.open(&name)? else {
+        let Some(Opened { mut file, meta, id }) = self.dir.open(&name)? else {
             return Ok(step);
         };
-        let id = file_id(&meta);
         let len = meta.len();
         let mut texts = Vec::new();
         let same = self
@@ -91,7 +89,7 @@ impl Tail {
     /// Moves to file `name`. A file read before in this stream goes on where
     /// it stopped; another one starts near its end, as at the start of the
     /// stream, so an old file that becomes the newest is not sent whole.
-    fn switch(&mut self, name: String, id: Option<(u64, u64)>, len: u64, texts: &mut Vec<String>) {
+    fn switch(&mut self, name: String, id: (u64, u64), len: u64, texts: &mut Vec<String>) {
         // A last line of the old file without a line end is kept, not lost.
         texts.extend(self.splitter.finish());
         self.splitter = LineSplitter::new(false);
