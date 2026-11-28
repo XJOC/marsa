@@ -159,6 +159,7 @@ impl DbBrowserState {
         self.query = None;
         self.query_id = None;
         self.tables_id = None;
+        self.table_id = None;
         self.error = None;
         self.filter.clear();
         self.keys_id = None;
@@ -306,6 +307,7 @@ impl Model {
         db.key_id = None;
         if db.chosen.as_ref() != Some(&source) {
             db.open = None;
+            db.table_id = None;
             db.query = None;
             db.query_id = None;
         }

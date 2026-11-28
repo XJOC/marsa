@@ -63,8 +63,11 @@ pub enum DbUpdate {
         id: u64,
         result: Result<DbValue, String>,
     },
+    /// The columns of `table` of `source`.
     Table {
         id: u64,
+        source: DbSource,
+        table: DbTableRef,
         result: Result<DbTable, String>,
     },
     Keys {
@@ -116,10 +119,15 @@ pub(super) async fn run(
             id,
             result: client.db_cell(&request).await.map_err(code),
         })),
-        DbCommand::ReadTable { id, source, table } => Some(Update::Db(DbUpdate::Table {
-            id,
-            result: client.db_table(&source, &table).await.map_err(code),
-        })),
+        DbCommand::ReadTable { id, source, table } => {
+            let result = client.db_table(&source, &table).await.map_err(code);
+            Some(Update::Db(DbUpdate::Table {
+                id,
+                source,
+                table,
+                result,
+            }))
+        }
         DbCommand::ReadKeys { id, request } => Some(Update::Db(DbUpdate::Keys {
             id,
             result: client.db_keys(&request).await.map_err(failed),
