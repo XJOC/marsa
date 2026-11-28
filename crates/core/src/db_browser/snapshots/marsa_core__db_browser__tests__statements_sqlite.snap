@@ -8,7 +8,7 @@ SELECT * FROM "users" ORDER BY "id" LIMIT 500 OFFSET 9223372036854775807
 SELECT * FROM "users" ORDER BY "order_id", "line" LIMIT 500 OFFSET 1000
 SELECT * FROM "events" LIMIT 500 OFFSET 99500
 SELECT * FROM "events" ORDER BY "email" DESC LIMIT 500 OFFSET 0
-SELECT COUNT(*) FROM "users"
+SELECT COUNT(*) FROM "users" WHERE 1
 SELECT "bio" FROM "users" WHERE "id" = ?
 SELECT "note" FROM "users" WHERE "order_id" = ? AND "line" = ?
 SELECT "avatar" FROM "users" WHERE "id" = ?

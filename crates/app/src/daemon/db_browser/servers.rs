@@ -309,45 +309,32 @@ where
 
 /// The server's databases, without its own.
 pub(super) async fn databases(conn: &mut Conn) -> Result<Vec<String>, HttpError> {
-    let rows: Vec<Option<String>> = match conn {
-        Conn::Mysql(conn) => sqlx::query(db_browser::databases_sql(DbServer::Mysql))
-            .fetch_all(conn)
-            .await
-            .map_err(db_error)?
-            .iter()
-            .map(|row| row.try_get(0))
-            .collect::<Result<_, _>>()
-            .map_err(db_error)?,
-        Conn::Postgres(conn) => sqlx::query(db_browser::databases_sql(DbServer::Postgres))
-            .fetch_all(conn)
-            .await
-            .map_err(db_error)?
-            .iter()
-            .map(|row| row.try_get(0))
-            .collect::<Result<_, _>>()
-            .map_err(db_error)?,
+    let names = match conn {
+        Conn::Mysql(conn) => {
+            let rows = sqlx::query(db_browser::databases_sql(DbServer::Mysql)).fetch(conn);
+            catalog::list(rows, db_error, catalog::database).await?
+        }
+        Conn::Postgres(conn) => {
+            let rows = sqlx::query(db_browser::databases_sql(DbServer::Postgres)).fetch(conn);
+            catalog::list(rows, db_error, catalog::database).await?
+        }
     };
-    Ok(rows.into_iter().flatten().collect())
+    Ok(names.into_iter().flatten().collect())
 }
 
 /// The tables and views of the connection's database.
 pub(super) async fn tables(conn: &mut Conn) -> Result<DbTables, HttpError> {
-    match conn {
+    let tables = match conn {
         Conn::Mysql(conn) => {
-            let rows = sqlx::query(db_browser::tables_sql(Engine::Mysql))
-                .fetch_all(conn)
-                .await
-                .map_err(db_error)?;
-            catalog::tables(&rows)
+            let rows = sqlx::query(db_browser::tables_sql(Engine::Mysql)).fetch(conn);
+            catalog::list(rows, db_error, catalog::table).await?
         }
         Conn::Postgres(conn) => {
-            let rows = sqlx::query(db_browser::tables_sql(Engine::Postgres))
-                .fetch_all(conn)
-                .await
-                .map_err(db_error)?;
-            catalog::tables(&rows)
+            let rows = sqlx::query(db_browser::tables_sql(Engine::Postgres)).fetch(conn);
+            catalog::list(rows, db_error, catalog::table).await?
         }
-    }
+    };
+    Ok(DbTables { tables })
 }
 
 /// MySQL's error number when `max_execution_time` stopped a statement.
