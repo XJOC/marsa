@@ -81,6 +81,7 @@ pub fn caddy_spec_for(paths: &CaddyPaths, program: PathBuf) -> ServiceSpec {
         cwd: None,
         restart: RESTART,
         stop: StopMethod::term(STOP_GRACE),
+        own_group: false,
     }
 }
 

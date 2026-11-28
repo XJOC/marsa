@@ -44,6 +44,7 @@ pub(super) fn spec(program: PathBuf, smtp_port: u16, database: &Path) -> Service
         cwd: None,
         restart: RestartPolicy::Never,
         stop: mailpit_stop(),
+        own_group: false,
     }
 }
 

@@ -93,6 +93,7 @@ pub(super) fn spec(
         cwd: None,
         restart: RestartPolicy::Never,
         stop,
+        own_group: false,
     }
 }
 

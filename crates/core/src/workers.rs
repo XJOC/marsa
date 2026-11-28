@@ -66,6 +66,8 @@ pub fn worker_spec(kind: WorkerKind, site: SiteKey, paths: WorkerPaths<'_>) -> S
         cwd: Some(paths.root.to_owned()),
         restart: RESTART,
         stop: stop_method(kind),
+        // `schedule:work` starts `schedule:run`, which starts the tasks.
+        own_group: true,
     }
 }
 
