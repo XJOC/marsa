@@ -11,18 +11,19 @@ name: windows-databases-e2e
 # the user and runs every marsa command with --data-dir. It is not part of
 # the tests that `cargo nextest` runs.
 #
-# Valkey's Windows archive is the artifact of a valkey-build run, until the
-# release valkey-<version>-r<revision> is published: a draft's files cannot
-# be downloaded without a token. Artifacts last 14 days; without one the
-# script skips Valkey and says so in a notice.
+# Valkey's Windows archive comes from our published release: the script
+# downloads it and checks it against sha256sums.txt. A run by hand with
+# `valkey_run` tests a new build before its release instead, from the artifact
+# of that valkey-build run (artifacts last 14 days). Without an archive the
+# job fails.
 
 on:
   workflow_dispatch:
     inputs:
       valkey_run:
-        description: "The id of a valkey-build run whose artifact valkey-windows-x64 holds the Windows archive"
-        required: true
-        default: "44939163554"
+        description: "Empty: the published release. Or the id of a valkey-build run, to test the Windows archive in its artifact valkey-windows-x64"
+        required: false
+        default: ""
   pull_request:
     paths:
       - "crates/app/src/daemon/services/databases/**"
@@ -38,6 +39,7 @@ on:
       - "crates/app/src/daemon/db_browser/**"
       - "crates/core/src/db_browser/**"
       - "crates/app/src/cli/db.rs"
+      - "crates/app/src/cli/db/**"
       - ".github/workflows/windows-databases-e2e.yml"
 
 # Read-only on purpose: the job never writes to the repository. `actions:
@@ -66,6 +68,17 @@ jobs:
         with:
           persist-credentials: false
 
+      # Only a run by hand that names a run. A missing or expired artifact
+      # fails the job here, before the build.
+      - name: Valkey's Windows archive from a valkey-build run
+        if: inputs.valkey_run
+        uses: actions/download-artifact@v4
+        with:
+          name: valkey-windows-x64
+          run-id: ${{ inputs.valkey_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/valkey-artifact
+
       # Reads the pinned version from rust-toolchain.toml.
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install --profile minimal
@@ -77,22 +90,12 @@ jobs:
       - name: Build marsa and marsad
         run: cargo build --release -p marsa
 
-      # A missing or expired artifact is no failure: the script then skips
-      # Valkey and says so.
-      - name: Valkey's Windows archive from a valkey-build run
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: valkey-windows-x64
-          run-id: ${{ inputs.valkey_run || '44939163554' }}
-          github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/valkey-artifact
-
       - name: End to end
         shell: pwsh
         timeout-minutes: 40
         env:
-          VALKEY_ZIP: ${{ runner.temp }}\valkey-artifact\valkey-8.1.11-windows-x64.zip
+          # Empty without `valkey_run`: the script then takes the release.
+          VALKEY_ZIP: ${{ inputs.valkey_run && format('{0}\valkey-artifact\valkey-8.1.11-windows-x64.zip', runner.temp) || '' }}
         run: ./tools/e2e/windows-databases.ps1
 
       # Logs only, copied there by the script after a failure.

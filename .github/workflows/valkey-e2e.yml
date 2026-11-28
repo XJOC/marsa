@@ -9,22 +9,57 @@ name: valkey-e2e
 # with --data-dir in a new folder. No sudo. It is not part of the tests that
 # `cargo nextest` runs.
 #
-# Run by hand only until the release valkey-<version>-r<revision> of
-# valkey-build.yml is published: a draft's files cannot be downloaded
-# without a token. Then this workflow gets the pull_request and push paths
-# of mysql-e2e.yml.
+# The archive is the one of our published release, which the script names. A
+# run by hand can give another one, such as a new build's.
 
 on:
   workflow_dispatch:
     inputs:
       archive:
-        description: "The Valkey archive: an https URL, with {platform} for darwin-arm64, darwin-x64, linux-x64, or linux-arm64. Its folder must hold sha256sums.txt."
-        required: true
-        default: "https://github.com/XJOC/marsa/releases/download/valkey-8.1.11-r1/valkey-8.1.11-{platform}.tar.gz"
+        description: "Empty: the published release. Or an https URL, with {platform} for darwin-arm64, darwin-x64, linux-x64, or linux-arm64; its folder must hold sha256sums.txt."
+        required: false
+        default: ""
       version:
-        description: "The Valkey version in the archive"
-        required: true
-        default: "8.1.11"
+        description: "The Valkey version in the archive (empty: the script's own)"
+        required: false
+        default: ""
+  # Every pull request that changes these paths, so a change to the Valkey
+  # code runs this before it merges, and main after it.
+  pull_request:
+    paths:
+      - "crates/app/src/daemon/services/databases/**"
+      - "crates/app/src/daemon/services/api.rs"
+      - "crates/app/src/cli/strings/**"
+      - "crates/app/src/cli/services.rs"
+      - "crates/app/src/daemon/runtimes/api.rs"
+      - "crates/app/src/daemon/services/supervisor.rs"
+      - "crates/core/src/databases/**"
+      - "crates/core/src/platform/process/**"
+      - "recipes/valkey.toml"
+      - "tools/e2e/valkey.sh"
+      - "crates/app/src/daemon/db_browser/**"
+      - "crates/core/src/db_browser/**"
+      - "crates/app/src/cli/db.rs"
+      - "crates/app/src/cli/db/**"
+      - ".github/workflows/valkey-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/app/src/daemon/services/databases/**"
+      - "crates/app/src/daemon/services/api.rs"
+      - "crates/app/src/cli/strings/**"
+      - "crates/app/src/cli/services.rs"
+      - "crates/app/src/daemon/runtimes/api.rs"
+      - "crates/app/src/daemon/services/supervisor.rs"
+      - "crates/core/src/databases/**"
+      - "crates/core/src/platform/process/**"
+      - "recipes/valkey.toml"
+      - "tools/e2e/valkey.sh"
+      - "crates/app/src/daemon/db_browser/**"
+      - "crates/core/src/db_browser/**"
+      - "crates/app/src/cli/db.rs"
+      - "crates/app/src/cli/db/**"
+      - ".github/workflows/valkey-e2e.yml"
 
 # Read-only on purpose: the job never writes to the repository.
 permissions:
