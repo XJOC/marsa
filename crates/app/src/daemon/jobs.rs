@@ -120,6 +120,26 @@ where
     A: FnOnce(&Daemon, &T) + Send + 'static,
 {
     let id = daemon.jobs().next_id();
+    (id, start_as(daemon, id, kind, what, outcome, work, after))
+}
+
+/// [`start`], for a caller that needs the job's id, from [`Jobs::next_id`],
+/// before the job is visible: what it prepares under that id is in place
+/// when the first request that names the job arrives.
+pub(super) fn start_as<T, W, A>(
+    daemon: &Arc<Daemon>,
+    id: u64,
+    kind: JobKind,
+    what: &'static str,
+    outcome: fn(T) -> JobOutcome,
+    work: W,
+    after: A,
+) -> Ended<T>
+where
+    T: Clone + Send + 'static,
+    W: Future<Output = Result<T, HttpError>> + Send + 'static,
+    A: FnOnce(&Daemon, &T) + Send + 'static,
+{
     let event = move |update| JobEvent { id, kind, update };
     daemon.publish_job(event(JobUpdate::Running {
         step: JobStep::Started,
@@ -148,7 +168,7 @@ where
         // Nobody waits when the job came from a `/v1/jobs/...` route.
         let _ = send.send(result);
     });
-    (id, ended)
+    ended
 }
 
 /// The answer of a `POST /v1/jobs/...` route: `202` and the job's id. The

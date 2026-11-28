@@ -395,31 +395,30 @@ async fn start_query(
         daemon: Arc::clone(&daemon),
         source: source.clone(),
     };
-    let (id_sent, id) = tokio::sync::oneshot::channel::<u64>();
+    let id = daemon.jobs().next_id();
+    let cancel = daemon.db_browser().queries.register(id);
     let work = {
         let daemon = Arc::clone(&daemon);
         let source = source.clone();
         async move {
             let _busy = busy;
             let started = Instant::now();
-            let id = id
-                .await
-                .map_err(|_| unavailable("the job has no id".to_owned()))?;
-            let (result, done) = query::run(&daemon, id, target, statement).await?;
+            let (result, done) = query::run(&daemon, id, cancel, target, statement).await?;
             log(&source, "query", started, result.rows.len());
             daemon.db_browser().queries.keep(id, result);
             Ok(done)
         }
     };
-    let (id, _ended) = crate::daemon::jobs::start(
+    // Nobody waits for the job's end: this route has no old waiting form.
+    drop(crate::daemon::jobs::start_as(
         &daemon,
+        id,
         JobKind::DbQuery,
         "db query",
         JobOutcome::DbQuery,
         work,
         |_, _| {},
-    );
-    let _ = id_sent.send(id);
+    ));
     Ok((StatusCode::ACCEPTED, Json(JobAccepted { id })))
 }
 
