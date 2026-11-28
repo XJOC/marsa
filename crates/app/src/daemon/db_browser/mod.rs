@@ -1,5 +1,6 @@
 //! The database browser (ADR 0028): the window and `marsa db` read the
-//! user's local databases through these routes. Only `marsad` has a driver.
+//! user's local databases through these routes. Only `marsad` has a driver,
+//! and only it speaks to Valkey ([`keys`]).
 //!
 //! | Route | Answer |
 //! | --- | --- |
@@ -10,6 +11,8 @@
 //! | `POST /v1/db/cell` | `DbValue`: one whole value, up to 64 KiB, by the row's key |
 //! | `POST /v1/jobs/db/query` | `202 JobAccepted`: one statement of the user's runs as a job ([`query`]) |
 //! | `GET /v1/db/results/{id}` | `DbResult`: the rows of a finished statement, once |
+//! | `POST /v1/db/keys` | `DbKeys`: some keys of a Valkey database, by `SCAN` |
+//! | `POST /v1/db/key` | `DbKeyDetail`: a key's time to live and the start of its value |
 //! | `POST /v1/db/close` | `204`: every browser connection closes |
 //!
 //! | Error | When |
@@ -21,27 +24,31 @@
 //! | 404 `db_table_not_found` | the catalog does not list the table |
 //! | 404 `db_row_not_found` | no row has the key, or the table has no key |
 //! | 404 `db_result_gone` | the rows were read already, kept too long, or closed |
+//! | 404 `db_key_not_found` | the key expired or was deleted |
+//! | 400 `db_pattern_too_long` | the search for keys is longer than 1 KiB |
 //! | 400 `db_one_statement`, `db_sql_too_long` | the text is not one statement of at most 256 KiB |
 //! | 409 `db_busy` | a statement of the user's runs on that source already |
-//! | 400 `db_source_invalid` | the sort column is not the table's, or a name cannot be quoted |
+//! | 400 `db_source_invalid` | the sort column is not the table's, a name cannot be quoted, Valkey has no such database, or a key's name is too long |
 //! | 404 `db_file_not_found` | the site has no SQLite file; none is made |
 //! | 403 `db_file_outside_site` | the file is not a regular file inside the site's folder |
 //! | 409 `db_server_not_running` | the server is not Marsa's running one |
-//! | 502 `db_sign_in_failed` | the server refused `root` with no password; `detail` says why |
+//! | 502 `db_sign_in_failed` | the server refused `root`, or Valkey a client, with no password; `detail` says why |
 //! | 502 `db_unavailable` | the database could not be opened or read; `detail` says why |
 //! | 504 `db_timeout` | the database did not answer within 10 seconds |
 //!
 //! What the log keeps: the source, the kind of request, its time, and the
-//! number of rows. Never a table's name, a value, SQL text, or what a
+//! number of rows. Never a table's or a key's name, a value, SQL text, or what a
 //! database said: those go to the client that asked, and only there.
 
 mod catalog;
+mod keys;
 mod query;
 mod rows;
 mod servers;
 mod sqlite;
 mod store;
 
+use std::fmt::Display;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -55,8 +62,8 @@ use marsa_core::codes;
 use marsa_core::databases::ServerKind;
 use marsa_core::types::{
     DbCellRequest, DbDatabase, DbPage, DbQueryRequest, DbResult, DbRowsRequest, DbServer,
-    DbServerInfo, DbSource, DbSources, DbTable, DbTableRequest, DbTables, DbTablesRequest, DbValue,
-    JobAccepted, JobKind, JobOutcome,
+    DbServerInfo, DbSource, DbSources, DbTable, DbTableRequest, DbTables, DbTablesRequest,
+    DbValkeyInfo, DbValue, JobAccepted, JobKind, JobOutcome,
 };
 use tracing::info;
 
@@ -80,6 +87,8 @@ const IDLE: Duration = Duration::from_secs(60);
 /// `marsad` holds nothing of it. SQLite files are never kept open.
 pub(crate) struct Browser {
     store: Arc<store::Store<servers::Conn>>,
+    /// The one connection to Valkey.
+    valkey: Arc<store::Store<keys::Conn, ()>>,
     queries: query::Queries,
 }
 
@@ -94,24 +103,27 @@ impl Default for Browser {
     fn default() -> Self {
         Self {
             store: Arc::new(store::Store::new(IDLE)),
+            valkey: Arc::new(store::Store::new(IDLE)),
             queries: query::Queries::default(),
         }
     }
 }
 
 impl Browser {
-    /// The slot of `key`; the first one starts the task that closes idle
-    /// connections.
+    /// The slot of `key`.
     fn slot(&self, key: store::Key, daemon: &Daemon) -> store::Slot<servers::Conn> {
-        let (slot, start) = self.store.slot(&key);
-        if start {
-            self.store.spawn_reaper(daemon.shutdown().clone());
-        }
-        slot
+        open_slot(&self.store, &key, daemon)
+    }
+
+    fn valkey_slot(&self, daemon: &Daemon) -> store::Slot<keys::Conn> {
+        open_slot(&self.valkey, &(), daemon)
     }
 
     /// Closes the connections to `kind`, before it stops.
     pub(crate) fn close_server(&self, kind: ServerKind) {
+        if kind == ServerKind::Valkey {
+            self.valkey.close_all();
+        }
         if let Some(server) = DbServer::ALL.into_iter().find(|s| s.kind() == kind) {
             self.store.close_server(server);
         }
@@ -119,7 +131,22 @@ impl Browser {
 
     pub(crate) fn close_all(&self) {
         self.store.close_all();
+        self.valkey.close_all();
     }
+}
+
+/// The slot of `key` in `store`; the first one starts the task that closes
+/// the store's idle connections.
+fn open_slot<C: Send + 'static, K: PartialEq + Clone + Send + 'static>(
+    store: &Arc<store::Store<C, K>>,
+    key: &K,
+    daemon: &Daemon,
+) -> store::Slot<C> {
+    let (slot, start) = store.slot(key);
+    if start {
+        store.spawn_reaper(daemon.shutdown().clone());
+    }
+    slot
 }
 
 /// The routes, for `http::routes::router` to merge before its fallbacks.
@@ -132,6 +159,8 @@ pub fn routes() -> Router<Arc<Daemon>> {
         .route("/v1/db/cell", post(cell))
         .route("/v1/jobs/db/query", post(start_query))
         .route("/v1/db/results/{id}", get(result))
+        .route("/v1/db/keys", post(keys::keys))
+        .route("/v1/db/key", post(keys::key))
         .route("/v1/db/close", post(close))
 }
 
@@ -146,13 +175,18 @@ async fn sources(State(daemon): State<Arc<Daemon>>) -> Result<Json<DbSources>, H
             servers.push(info);
         }
     }
+    let valkey = valkey_info(&daemon).await?;
     info!(
         request = "sources",
         elapsed_ms = elapsed_ms(started),
-        rows = files.len() + servers.len(),
+        rows = files.len() + servers.len() + usize::from(valkey.is_some()),
         "database browser"
     );
-    Ok(Json(DbSources { servers, files }))
+    Ok(Json(DbSources {
+        servers,
+        files,
+        valkey,
+    }))
 }
 
 /// An installed server, with its databases while it runs. A server that
@@ -162,21 +196,10 @@ async fn server_info(
     daemon: &Arc<Daemon>,
     server: DbServer,
 ) -> Result<Option<DbServerInfo>, HttpError> {
-    let manager = daemon.server(server.kind());
-    let data_dir = daemon.data_dir().to_path_buf();
-    let listed = crate::daemon::http::blocking("db server", {
-        let daemon = Arc::clone(daemon);
-        move || {
-            let manager = daemon.server(server.kind());
-            Ok(manager
-                .listed(&data_dir)
-                .then(|| manager.version(&data_dir)))
-        }
-    })
-    .await?;
-    let Some(version) = listed else {
+    let Some(version) = installed_version(daemon, server.kind()).await? else {
         return Ok(None);
     };
+    let manager = daemon.server(server.kind());
     let state = manager.status().state;
     // Only once it said it takes connections: a server that starts is
     // listed with its state, no databases yet, and no problem.
@@ -193,9 +216,52 @@ async fn server_info(
     };
     Ok(Some(DbServerInfo {
         server,
-        version: version
-            .map(|version| version.to_string())
-            .unwrap_or_default(),
+        version,
+        state,
+        databases,
+        problem,
+    }))
+}
+
+/// The version of `kind` that a start runs, empty when none is, if the server
+/// is one `GET /v1/services` lists; else `None`.
+async fn installed_version(
+    daemon: &Arc<Daemon>,
+    kind: ServerKind,
+) -> Result<Option<String>, HttpError> {
+    let data_dir = daemon.data_dir().to_path_buf();
+    crate::daemon::http::blocking("db server", {
+        let daemon = Arc::clone(daemon);
+        move || {
+            let manager = daemon.server(kind);
+            Ok(manager.listed(&data_dir).then(|| {
+                let version = manager.version(&data_dir);
+                version
+                    .map(|version| version.to_string())
+                    .unwrap_or_default()
+            }))
+        }
+    })
+    .await
+}
+
+/// Valkey, listed as [`server_info`] lists a SQL server.
+async fn valkey_info(daemon: &Arc<Daemon>) -> Result<Option<DbValkeyInfo>, HttpError> {
+    let Some(version) = installed_version(daemon, ServerKind::Valkey).await? else {
+        return Ok(None);
+    };
+    let manager = daemon.server(ServerKind::Valkey);
+    let state = manager.status().state;
+    let (databases, problem) = if manager.ready_port(daemon).is_some() {
+        match within(keys::databases(daemon)).await {
+            Ok(databases) => (databases, None),
+            Err(err) => (Vec::new(), Some(err.code.to_owned())),
+        }
+    } else {
+        (Vec::new(), None)
+    };
+    Ok(Some(DbValkeyInfo {
+        version,
         state,
         databases,
         problem,
@@ -433,7 +499,7 @@ async fn within<T>(work: impl Future<Output = Result<T, HttpError>>) -> Result<T
 }
 
 /// The one log line of a request: what the ADR allows, and nothing more.
-fn log(source: &DbSource, request: &'static str, started: Instant, rows: usize) {
+fn log(source: impl Display, request: &'static str, started: Instant, rows: usize) {
     // A database's name may hold a line break: escaped, it cannot forge a
     // line of the log.
     info!(

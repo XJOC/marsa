@@ -199,6 +199,26 @@ impl ServerManager {
         *lock(&self.ready)
     }
 
+    /// As if this server ran and took connections on `port`: for a test
+    /// that plays the server itself. The task only waits for its stop.
+    #[cfg(test)]
+    pub(crate) fn pretend_ready(&self, daemon: &Daemon, port: u16) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let stopped = cancel.clone();
+        let handle = crate::daemon::services::supervisor::ServiceHandle {
+            cancel,
+            task: tokio::spawn(async move { stopped.cancelled().await }),
+            runtime: Arc::clone(&self.runtime),
+            stop_limit: Duration::from_secs(1),
+        };
+        daemon.add_proc(ServiceId::Database(self.kind), handle);
+        *lock(&self.ready) = Some(port);
+        let mut runtime = lock(&self.runtime);
+        runtime.status.state = ServiceState::Starting;
+        runtime.status.pid = Some(std::process::id());
+        runtime.set_ready(daemon.events());
+    }
+
     /// The version a start runs, as the database browser lists it; `None`
     /// when none is installed.
     pub fn version(&self, data_dir: &Path) -> Option<semver::Version> {

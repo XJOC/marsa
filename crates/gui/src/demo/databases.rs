@@ -38,6 +38,7 @@ pub(super) fn fill(model: &mut Model, demo: Demo) {
             site: "blog".into(),
             path: "database/database.sqlite".into(),
         }],
+        valkey: None,
     });
     if !running {
         db.chosen = Some(DbSource::Server {

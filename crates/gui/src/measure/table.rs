@@ -62,6 +62,7 @@ pub(super) fn fill(model: &mut Model, rows: u64) {
             problem: None,
         }],
         files: Vec::new(),
+        valkey: None,
     });
     db.chosen = Some(source());
     db.tables = Some(DbTables {
