@@ -4,10 +4,19 @@
 //! the window on a `std::sync::mpsc` channel, and commands come back on a
 //! tokio channel. [`DaemonClient`] never leaves this module, so the token
 //! never reaches the drawing code (architecture.md section 3).
+//!
+//! Each connection is a session with a number, and every message either way is
+//! [`Stamped`] with one. A session's tasks end with it, and neither side acts
+//! on a message of another session: the window's request numbers start again
+//! with each one, so an old answer could pass for a new one.
 
 mod db_browser;
 mod dumps;
+#[cfg(test)]
+pub(crate) mod fake;
 mod mail;
+#[cfg(test)]
+mod session_tests;
 mod site_log;
 
 pub use db_browser::{DbCommand, DbUpdate};
@@ -24,6 +33,7 @@ use marsa_core::types::{
     SiteKey, SiteList, SitePatch, WorkerKind,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::task::JoinSet;
 
 use crate::model::{Autostart, Change, InstallJob, Removal, Update};
 use crate::strings;
@@ -91,14 +101,23 @@ pub enum Command {
     StopSiteLog,
 }
 
+/// An update or a command, and the session it belongs to: the one that
+/// sends an update, or the one the window was in when it made a command. 0 is
+/// no session: before the first connection.
+#[derive(Debug)]
+pub struct Stamped<T> {
+    pub session: u64,
+    pub body: T,
+}
+
 /// The window's end of the bridge.
 pub struct Handle {
-    pub updates: mpsc::Receiver<Update>,
-    commands: UnboundedSender<Command>,
+    pub updates: mpsc::Receiver<Stamped<Update>>,
+    commands: UnboundedSender<Stamped<Command>>,
     repaint: Arc<OnceLock<egui::Context>>,
     /// The demo's end of `updates`: kept so the channel stays open and the
     /// window does not take it for a bridge that stopped.
-    _demo: Option<mpsc::Sender<Update>>,
+    _demo: Option<mpsc::Sender<Stamped<Update>>>,
 }
 
 impl Handle {
@@ -126,7 +145,13 @@ impl Handle {
         }
     }
 
-    pub fn send(&self, command: Command) {
+    /// Sends a command the window made in `session`. The bridge drops it if
+    /// that session has ended.
+    pub fn send(&self, session: u64, command: Command) {
+        let command = Stamped {
+            session,
+            body: command,
+        };
         if self.commands.send(command).is_err() {
             tracing::warn!("the bridge has stopped; the command is dropped");
         }
@@ -136,13 +161,19 @@ impl Handle {
 /// The bridge's end of the channel to the window.
 #[derive(Clone)]
 struct Window {
-    updates: mpsc::Sender<Update>,
+    updates: mpsc::Sender<Stamped<Update>>,
     repaint: Arc<OnceLock<egui::Context>>,
+    /// The session whose updates go through this end.
+    session: u64,
 }
 
 impl Window {
     /// Sends the update and wakes the window. `false` once the window is gone.
     fn send(&self, update: Update) -> bool {
+        let update = Stamped {
+            session: self.session,
+            body: update,
+        };
         let open = self.updates.send(update).is_ok();
         if let Some(ctx) = self.repaint.get() {
             ctx.request_repaint();
@@ -189,6 +220,7 @@ fn start_with(data_dir: PathBuf, daemon: Daemon) -> std::io::Result<Handle> {
     let window = Window {
         updates: updates_tx,
         repaint: Arc::clone(&repaint),
+        session: 0,
     };
     thread::Builder::new()
         .name("bridge".into())
@@ -201,7 +233,12 @@ fn start_with(data_dir: PathBuf, daemon: Daemon) -> std::io::Result<Handle> {
     })
 }
 
-fn run(data_dir: &Path, window: &Window, commands: UnboundedReceiver<Command>, daemon: Daemon) {
+fn run(
+    data_dir: &Path,
+    window: &Window,
+    commands: UnboundedReceiver<Stamped<Command>>,
+    daemon: Daemon,
+) {
     // One thread is enough: the bridge waits on the network most of the time.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -228,11 +265,16 @@ enum End {
 async fn serve(
     data_dir: &Path,
     window: &Window,
-    mut commands: UnboundedReceiver<Command>,
+    mut commands: UnboundedReceiver<Stamped<Command>>,
     daemon: Daemon,
 ) {
-    loop {
-        let update = match session(data_dir, window, &mut commands, daemon).await {
+    // Each attempt to connect takes the next number.
+    for number in 1_u64.. {
+        let window = Window {
+            session: number,
+            ..window.clone()
+        };
+        let update = match session(data_dir, &window, &mut commands, daemon).await {
             End::Closed => return,
             End::Lost => Update::Reconnecting,
             End::Failed(err) => {
@@ -252,7 +294,7 @@ async fn serve(
 async fn session(
     data_dir: &Path,
     window: &Window,
-    commands: &mut UnboundedReceiver<Command>,
+    commands: &mut UnboundedReceiver<Stamped<Command>>,
     daemon: Daemon,
 ) -> End {
     let connected = async {
@@ -269,16 +311,15 @@ async fn session(
         Ok(connected) => connected,
         Err(err) => return End::Failed(err),
     };
-    // Buttons pressed before this connection were meant for the last one.
-    while commands.try_recv().is_ok() {}
-    // Stops with this session when it is dropped.
+    // Each of these stops with this session when it is dropped.
+    let mut tasks = JoinSet::new();
     let mail = mail::Mail::start(&client, window);
     let dumps = dumps::Dumps::start(&client, window);
     let mut site_log = site_log::SiteLog::default();
     if !window.send(Update::Connected(health)) || !refresh(&client, window, &mail).await {
         return End::Closed;
     }
-    read_doctor(&client, window);
+    read_doctor(&mut tasks, &client, window);
     // A command's task asks here to read the runtimes again, so the read
     // runs in order with the events. This end lives as long as the loop, so
     // `recv` never ends.
@@ -312,7 +353,7 @@ async fn session(
                     }
                     // Setup changes what the checks find.
                     if setup_finished {
-                        read_doctor(&client, window);
+                        read_doctor(&mut tasks, &client, window);
                     }
                     // A new version, and maybe a first default: no event
                     // carries the whole list, so read it again.
@@ -336,18 +377,31 @@ async fn session(
                 }
                 None => return End::Lost,
             },
-            command = commands.recv() => match command {
-                Some(Command::ReadMail) => mail.send(mail::Job::Read),
-                Some(Command::ReadMailText(id)) => mail.send(mail::Job::Text(id)),
-                Some(Command::ClearMail) => mail.send(mail::Job::Clear),
-                Some(Command::ReadDumps) => dumps.send(dumps::Job::Read),
-                Some(Command::ClearDumps) => dumps.send(dumps::Job::Clear),
-                Some(Command::SetDumpsCapture(on)) => dumps.send(dumps::Job::Capture(on)),
-                Some(Command::FollowSiteLog(site)) => site_log.follow(&client, window, site),
-                Some(Command::StopSiteLog) => site_log.stop(),
-                Some(command) => run_command(&client, command, window.clone(), reread.clone()),
-                None => return End::Closed,
-            },
+            command = commands.recv() => {
+                let Some(command) = command else {
+                    return End::Closed;
+                };
+                // Pressed in a session that has ended, or before this one.
+                if command.session != window.session {
+                    continue;
+                }
+                match command.body {
+                    Command::ReadMail => mail.send(mail::Job::Read),
+                    Command::ReadMailText(id) => mail.send(mail::Job::Text(id)),
+                    Command::ClearMail => mail.send(mail::Job::Clear),
+                    Command::ReadDumps => dumps.send(dumps::Job::Read),
+                    Command::ClearDumps => dumps.send(dumps::Job::Clear),
+                    Command::SetDumpsCapture(on) => dumps.send(dumps::Job::Capture(on)),
+                    Command::FollowSiteLog(site) => site_log.follow(&client, window, site),
+                    Command::StopSiteLog => site_log.stop(),
+                    command => {
+                        let (window, reread) = (window.clone(), reread.clone());
+                        run_command(&mut tasks, &client, command, window, reread);
+                    }
+                }
+            }
+            // Forgets the tasks that have ended.
+            Some(_) = tasks.join_next() => {}
             Some(()) = rereads.recv() => {
                 if !runtimes_changed(&client, window).await {
                     return End::Closed;
@@ -422,9 +476,9 @@ fn log_ids(table: &[ServiceStatus]) -> Vec<ServiceId> {
 /// Reads the daemon's checks on their own task: they take seconds (the
 /// resolver, `netstat`), and nothing else waits for them. A failure is in the
 /// log only; Settings then says "Not checked".
-fn read_doctor(client: &DaemonClient, window: &Window) {
+fn read_doctor(tasks: &mut JoinSet<()>, client: &DaemonClient, window: &Window) {
     let (client, window) = (client.clone(), window.clone());
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         match client.doctor().await {
             Ok(report) => {
                 window.send(Update::Doctor(report));
@@ -497,13 +551,14 @@ async fn runtimes(client: &DaemonClient) -> Update {
 /// them) are sent here. After an uninstall, `reread` asks the session to
 /// read the runtimes again.
 fn run_command(
+    tasks: &mut JoinSet<()>,
     client: &DaemonClient,
     command: Command,
     window: Window,
     reread: UnboundedSender<()>,
 ) {
     let client = client.clone();
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let update = match command {
             Command::Service { service, action } => {
                 let result = client
@@ -795,7 +850,8 @@ mod tests {
         let update = handle
             .updates
             .recv_timeout(Duration::from_secs(10))
-            .expect("an answer");
+            .expect("an answer")
+            .body;
         assert!(
             matches!(&update, Update::Failed(code) if code == "daemon_not_running"),
             "{update:?}"

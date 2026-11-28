@@ -50,7 +50,10 @@ tray-icon.workspace = true
 winit.workspace = true
 
 [dev-dependencies]
+# A fake daemon for the bridge's tests, as `marsa-core`'s client tests have.
+axum.workspace = true
 tempfile.workspace = true
+tokio-stream.workspace = true
 
 [lints]
 workspace = true

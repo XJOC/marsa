@@ -114,7 +114,7 @@ impl App {
                     self.model.update(update);
                 }
             }
-            None => self.bridge.send(command),
+            None => self.bridge.send(self.model.session.number, command),
         }
     }
 
@@ -283,7 +283,7 @@ impl eframe::App for App {
 pub(crate) fn take_updates(bridge: &bridge::Handle, model: &mut Model) {
     loop {
         match bridge.updates.try_recv() {
-            Ok(update) => model.update(update),
+            Ok(update) => model.receive(update),
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
                 let failed = Connection::Failed(strings::BRIDGE_FAILED.to_owned());
