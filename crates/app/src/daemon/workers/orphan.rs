@@ -23,8 +23,14 @@
 //!
 //! The parent of the old process is not checked: the program it runs and
 //! its start time say it is ours, as for the database servers, and only one
-//! daemon runs at a time (`run/daemon.lock`). The signals reach the PHP
-//! process only: a `schedule:run` it started is not stopped.
+//! daemon runs at a time (`run/daemon.lock`).
+//!
+//! The worker led a process group of its own (`ServiceSpec::own_group`), so
+//! each signal goes to the group, and a `schedule:run` it started, with the
+//! tasks of that one, stops with it. What is left of the group once the
+//! worker is gone gets the same signals ([`pid_record::clear`]). A worker
+//! that ended by itself after the crash leaves no proof that a group is
+//! ours: what is left of it then gets no signal.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -95,6 +101,8 @@ pub(super) async fn clear(
         pid_file: path,
         port: None,
         recovery: process::WORKER_ORPHAN_RECOVERY,
+        // It led a group of its own (`ServiceSpec::own_group`).
+        group: true,
     };
     let programs = installed_programs(data_dir, platform, "php");
     let looks = pid_record::STOP_LOOKS;
@@ -183,6 +191,12 @@ mod tests {
         signals: Mutex<Vec<(u32, Signal)>>,
         /// The children of this daemon.
         children: Vec<u32>,
+        /// `Some`: the system has groups; each signal to one is recorded.
+        groups: Option<Mutex<Vec<(u32, Signal)>>>,
+        /// What `group_exists` says, one answer per look; then `false`.
+        group_looks: Mutex<Vec<bool>>,
+        /// Who has the pid of the group's id now, after the worker.
+        at_pgid: Liveness,
     }
 
     impl Fake {
@@ -192,11 +206,32 @@ mod tests {
                 last,
                 signals: Mutex::new(Vec::new()),
                 children: Vec::new(),
+                groups: None,
+                group_looks: Mutex::new(Vec::new()),
+                at_pgid: Liveness::Gone,
+            }
+        }
+
+        /// [`Fake::says`] on a system with groups: `group_looks` answers
+        /// `group_exists`, `at_pgid` who has the group's id as a pid.
+        fn with_groups(self, group_looks: Vec<bool>, at_pgid: Liveness) -> Self {
+            Self {
+                groups: Some(Mutex::new(Vec::new())),
+                group_looks: Mutex::new(group_looks),
+                at_pgid,
+                ..self
             }
         }
 
         fn signals(&self) -> Vec<(u32, Signal)> {
             lock(&self.signals).clone()
+        }
+
+        fn group_signals(&self) -> Vec<(u32, Signal)> {
+            self.groups
+                .as_ref()
+                .map(|g| lock(g).clone())
+                .unwrap_or_default()
         }
     }
 
@@ -224,6 +259,27 @@ mod tests {
         fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, std::io::Result<()>> {
             lock(&self.signals).push((pid, signal));
             Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn identity(&self, _pid: u32) -> BoxFuture<'_, Liveness> {
+            Box::pin(std::future::ready(self.at_pgid.clone()))
+        }
+
+        fn signal_group(&self, pgid: u32, signal: Signal) -> BoxFuture<'_, std::io::Result<()>> {
+            let sent = match &self.groups {
+                Some(groups) => {
+                    lock(groups).push((pgid, signal));
+                    Ok(())
+                }
+                None => Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+            };
+            Box::pin(std::future::ready(sent))
+        }
+
+        fn group_exists(&self, _pgid: u32) -> BoxFuture<'_, bool> {
+            let mut looks = lock(&self.group_looks);
+            let now = !looks.is_empty() && looks.remove(0);
+            Box::pin(std::future::ready(now))
         }
     }
 
@@ -324,6 +380,92 @@ mod tests {
         assert_eq!(before, Before::Note(text));
         assert_eq!(fake.signals(), [(PID, Signal::Term)]);
         assert!(!pid_path(temp.path(), queue()).exists());
+    }
+
+    /// The worker led its own group: the group gets the signal, so the
+    /// `schedule:run` it started stops with it.
+    #[tokio::test]
+    async fn our_old_worker_gets_its_signals_as_a_group() {
+        let (temp, php) = data();
+        recorded(temp.path(), &php);
+        let fake = Fake::says(vec![alive(&php, 7), alive(&php, 7)], Liveness::Gone)
+            .with_groups(Vec::new(), Liveness::Gone);
+        assert!(matches!(run(&fake, temp.path()).await, Before::Note(_)));
+        assert_eq!(fake.group_signals(), [(PID, Signal::Term)]);
+        assert!(fake.signals().is_empty());
+    }
+
+    /// What is left of the group gets the worker's grace for the signal it
+    /// got with it, and nothing more when it ends within it.
+    #[tokio::test]
+    async fn the_rest_of_the_group_gets_the_workers_grace() {
+        let (temp, php) = data();
+        recorded(temp.path(), &php);
+        let fake = Fake::says(vec![alive(&php, 7), alive(&php, 7)], Liveness::Gone)
+            .with_groups(vec![true], Liveness::Gone);
+        assert!(matches!(run(&fake, temp.path()).await, Before::Note(_)));
+        assert_eq!(fake.group_signals(), [(PID, Signal::Term)]);
+        assert!(fake.signals().is_empty());
+        assert!(!pid_path(temp.path(), queue()).exists());
+    }
+
+    /// A part of the group that outlives the grace (a task that traps
+    /// SIGTERM) gets SIGKILL, not the ladder again.
+    #[tokio::test]
+    async fn the_rest_of_the_group_that_outlives_the_grace_gets_sigkill() {
+        let (temp, php) = data();
+        recorded(temp.path(), &php);
+        let fake = Fake::says(vec![alive(&php, 7), alive(&php, 7)], Liveness::Gone)
+            .with_groups(vec![true; 20], Liveness::Gone);
+        assert!(matches!(run(&fake, temp.path()).await, Before::Note(_)));
+        assert_eq!(
+            fake.group_signals(),
+            [(PID, Signal::Term), (PID, Signal::Kill)]
+        );
+        assert!(fake.signals().is_empty());
+    }
+
+    /// The worker ended before any signal, at the check right before it:
+    /// what is left of its group gets the whole ladder.
+    #[tokio::test]
+    async fn the_rest_of_a_group_whose_worker_ended_first_gets_the_ladder() {
+        let (temp, php) = data();
+        recorded(temp.path(), &php);
+        let fake = Fake::says(vec![alive(&php, 7)], Liveness::Gone)
+            .with_groups(vec![true, true], Liveness::Gone);
+        assert!(matches!(run(&fake, temp.path()).await, Before::Note(_)));
+        assert_eq!(fake.group_signals(), [(PID, Signal::Term)]);
+        assert!(fake.signals().is_empty());
+    }
+
+    /// A record whose worker ended by itself before this start proves
+    /// nothing about a group with that id: no signal at all.
+    #[tokio::test]
+    async fn a_stale_record_signals_no_group() {
+        for now in [Liveness::Gone, alive(Path::new("/usr/bin/vim"), 7)] {
+            let (temp, php) = data();
+            recorded(temp.path(), &php);
+            let fake =
+                Fake::says(Vec::new(), now.clone()).with_groups(vec![true; 20], Liveness::Gone);
+            assert_eq!(run(&fake, temp.path()).await, Before::Clear, "{now:?}");
+            assert!(fake.group_signals().is_empty(), "{now:?}");
+            assert!(fake.signals().is_empty(), "{now:?}");
+        }
+    }
+
+    /// A process has the group's id as its pid again, or the system cannot
+    /// say: the group may be someone else's, and gets no signal.
+    #[tokio::test]
+    async fn a_group_whose_id_is_a_pid_again_gets_no_signal() {
+        for at_pgid in [alive(Path::new("/usr/bin/vim"), 9), Liveness::Unknown] {
+            let (temp, php) = data();
+            recorded(temp.path(), &php);
+            let fake = Fake::says(vec![alive(&php, 7), alive(&php, 7)], Liveness::Gone)
+                .with_groups(vec![true; 10], at_pgid.clone());
+            assert!(matches!(run(&fake, temp.path()).await, Before::Note(_)));
+            assert_eq!(fake.group_signals(), [(PID, Signal::Term)], "{at_pgid:?}");
+            assert!(fake.signals().is_empty(), "{at_pgid:?}");
+        }
     }
 
     #[tokio::test]
