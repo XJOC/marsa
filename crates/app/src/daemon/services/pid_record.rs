@@ -5,7 +5,9 @@
 //!
 //! - ours (one of the accepted programs of this data folder, started at
 //!   that time): stopped by the signals of its stop method, then SIGKILL,
-//!   with the check again before each signal;
+//!   with the check again before each signal. A process that led its own
+//!   group ([`Owner::group`]) gets them as a group, and what is left of the
+//!   group once it is gone gets them too;
 //! - gone, or another program now: the record is deleted, nothing is
 //!   signalled;
 //! - cannot be told: no signal, and the record stays.
@@ -17,7 +19,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use marsa_core::orphan::{PidRecord, PidfileState, classify_pidfile};
+use marsa_core::orphan::{Liveness, PidRecord, PidfileState, classify_pidfile};
 use marsa_core::platform::process::{self, Signal};
 use marsa_core::services::{StopAction, StopMethod};
 use marsa_core::types::ServiceId;
@@ -46,6 +48,10 @@ pub(crate) struct Owner<'a> {
     /// The system recovers orphans of this kind (for a database server
     /// `process::DATABASE_ORPHAN_RECOVERY`): else nothing is read.
     pub(crate) recovery: bool,
+    /// The process led a process group of its own, whose id is its pid: a
+    /// site's worker. Each signal goes to the group while the process is
+    /// ours, and the rest of the group is stopped after it ([`end_group`]).
+    pub(crate) group: bool,
 }
 
 /// The steps of `ladder` that are signals, with their waits. A request to the
@@ -171,7 +177,7 @@ pub(crate) async fn clear(
                 return Err(Stuck(reason));
             }
             // Gone, or someone else's now: it ended between two checks.
-            _ => return Ok(done(owner, pid, sent).await),
+            _ => return Ok(ended(owner, probes, pid, sent, ladder).await),
         }
         warn!(
             pid,
@@ -179,12 +185,12 @@ pub(crate) async fn clear(
             service = %owner.id,
             "stopping our old process"
         );
-        if let Err(err) = probes.signal(pid, signal).await {
+        if let Err(err) = send(owner, probes, pid, signal).await {
             warn!(pid, signal = signal.name(), %err, "the signal failed");
         }
         sent = Some(signal);
         if gone(probes, &record, servers, wait).await {
-            return Ok(done(owner, pid, sent).await);
+            return Ok(ended(owner, probes, pid, sent, ladder).await);
         }
     }
     let reason = format!(
@@ -192,6 +198,82 @@ pub(crate) async fn clear(
         owner.name
     );
     Err(Stuck(reason))
+}
+
+/// Sends `signal` to our old process `pid`, which the caller found ours
+/// right before: to its group when it led one. A group signal that fails
+/// (the process left its group, or the system has no groups) goes to the
+/// process alone.
+async fn send(
+    owner: &Owner<'_>,
+    probes: &dyn ProcessProbe,
+    pid: u32,
+    signal: Signal,
+) -> std::io::Result<()> {
+    if owner.group {
+        match probes.signal_group(pid, signal).await {
+            Ok(()) => return Ok(()),
+            Err(err) => debug!(pid, %err, "no group signal; to the process alone"),
+        }
+    }
+    probes.signal(pid, signal).await
+}
+
+/// After our old process `pid` ended: the rest of its group, if it led one
+/// ([`end_group`]), then [`done`].
+async fn ended(
+    owner: &Owner<'_>,
+    probes: &dyn ProcessProbe,
+    pid: u32,
+    sent: Option<Signal>,
+    ladder: &StopMethod,
+) -> Cleared {
+    if owner.group {
+        end_group(owner, probes, pid, ladder).await;
+    }
+    done(owner, pid, sent).await
+}
+
+/// Stops what is left of the group `pgid` that our old process led, now
+/// that it is gone: the signals of `ladder`, then SIGKILL, each while the
+/// group has a process and no process has the pid `pgid`. The group was
+/// ours a moment ago, and the system gives no new process a pid that is
+/// still a group's id, so such a group is still ours. Anything else gets
+/// no signal. Nothing here keeps the start: these processes take no jobs
+/// of their own.
+async fn end_group(owner: &Owner<'_>, probes: &dyn ProcessProbe, pgid: u32, ladder: &StopMethod) {
+    let signals = signal_steps(ladder)
+        .into_iter()
+        .chain([(Signal::Kill, KILL_WAIT)]);
+    for (signal, wait) in signals {
+        if !probes.group_exists(pgid).await {
+            return;
+        }
+        let now = probes.identity(pgid).await;
+        if now != Liveness::Gone {
+            warn!(pgid, ?now, service = %owner.id, "the old group may not be ours now; no signal");
+            return;
+        }
+        warn!(
+            pgid,
+            signal = signal.name(),
+            service = %owner.id,
+            "stopping the rest of our old process's group"
+        );
+        if let Err(err) = probes.signal_group(pgid, signal).await {
+            warn!(pgid, signal = signal.name(), %err, "the group signal failed");
+        }
+        let started = Instant::now();
+        while probes.group_exists(pgid).await {
+            if started.elapsed() >= wait {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+    if probes.group_exists(pgid).await {
+        warn!(pgid, service = %owner.id, "the rest of our old group still runs after SIGKILL");
+    }
 }
 
 /// The file against what the system says now: the file the process really
@@ -302,5 +384,89 @@ mod tests {
         };
         assert_eq!(signal_steps(&ladder), [(Signal::Term, wait)]);
         assert!(signal_steps(&StopMethod { steps: Vec::new() }).is_empty());
+    }
+
+    /// A real orphan group: `sleep` stands for our PHP (a link to it, as in
+    /// `workers::orphan`), leads its own group, and has another `sleep` in
+    /// it, as `schedule:work` has its `schedule:run`. Both end.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn a_real_orphan_group_ends_whole() {
+        use std::io::BufRead as _;
+        use std::os::unix::process::CommandExt as _;
+
+        use crate::daemon::services::probe::SystemProbe;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sleep = ["/bin/sleep", "/usr/bin/sleep"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.exists())
+            .unwrap();
+        let link = temp.path().join("php");
+        std::os::unix::fs::symlink(sleep, &link).unwrap();
+        let php = std::fs::canonicalize(&link).unwrap();
+        // The leader starts the other `sleep`, prints its pid, then becomes
+        // a `sleep` itself. A fixed shell line, in a test only, with the
+        // path as `$0`: the product never builds one.
+        let mut leader = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "\"$0\" 600 >/dev/null 2>&1 & echo $!; exec \"$0\" 601 >/dev/null 2>&1",
+            ])
+            .arg(&link)
+            .stdout(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id();
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let member: u32 = line.trim().parse().unwrap();
+        // Collected at its end, so it is gone, not a zombie of this test.
+        std::thread::spawn(move || leader.wait());
+        let (exe, started) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Liveness::Alive { exe, started } = process::real_identity(pid).await
+                    && exe == php
+                {
+                    return (exe, started);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the leader runs our php");
+        let pid_file = temp.path().join("queue-shop.pid");
+        process::write_pid_file(&pid_file, &PidRecord { pid, exe, started }).unwrap();
+        let owner = Owner {
+            id: "queue-shop".parse().unwrap(),
+            name: "worker",
+            pid_file,
+            port: None,
+            recovery: true,
+            group: true,
+        };
+        let ladder = StopMethod::term(Duration::from_secs(5));
+        let cleared = clear(&owner, &SystemProbe, &[php], &ladder, STOP_LOOKS).await;
+        assert!(
+            matches!(cleared, Ok(Cleared::Stopped { .. })),
+            "{cleared:?}"
+        );
+        let gone = async {
+            while process::identity(member).await != Liveness::Gone {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        let gone = tokio::time::timeout(Duration::from_secs(10), gone).await;
+        if gone.is_err() {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", &member.to_string()])
+                .status();
+            panic!("the other process of the group still runs");
+        }
+        assert!(!process::group_exists(pid).await);
     }
 }

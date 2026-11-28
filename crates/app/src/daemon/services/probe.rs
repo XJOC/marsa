@@ -64,6 +64,20 @@ pub trait ProcessProbe: fmt::Debug + Send + Sync {
 
     /// Sends `signal` to `pid`. The caller checked the pid right before.
     fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>>;
+
+    /// Sends `signal` to every process of the group `pgid`
+    /// ([`process::signal_group`]). The caller checked right before that
+    /// the group is ours. The default sends nothing: `Unsupported`.
+    fn signal_group(&self, pgid: u32, _signal: Signal) -> BoxFuture<'_, io::Result<()>> {
+        let err = io::Error::new(io::ErrorKind::Unsupported, format!("no group {pgid}"));
+        Box::pin(std::future::ready(Err(err)))
+    }
+
+    /// Whether the group `pgid` has a process ([`process::group_exists`]).
+    /// The default says no.
+    fn group_exists(&self, _pgid: u32) -> BoxFuture<'_, bool> {
+        Box::pin(std::future::ready(false))
+    }
 }
 
 /// The real OS: `marsa_core::platform::process`.
@@ -101,5 +115,13 @@ impl ProcessProbe for SystemProbe {
 
     fn signal(&self, pid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(process::send_signal(pid, signal))
+    }
+
+    fn signal_group(&self, pgid: u32, signal: Signal) -> BoxFuture<'_, io::Result<()>> {
+        Box::pin(process::signal_group(pgid, signal))
+    }
+
+    fn group_exists(&self, pgid: u32) -> BoxFuture<'_, bool> {
+        Box::pin(process::group_exists(pgid))
     }
 }
