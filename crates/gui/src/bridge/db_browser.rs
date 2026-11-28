@@ -7,7 +7,6 @@ use marsa_core::types::{
     DbCellRequest, DbKeyDetail, DbKeyRequest, DbKeys, DbKeysRequest, DbPage, DbQueryRequest,
     DbResult, DbRowsRequest, DbSource, DbSources, DbTable, DbTableRef, DbTables, DbValue,
 };
-use tokio::runtime::Handle;
 
 use crate::model::Update;
 
@@ -115,9 +114,8 @@ impl Drop for Awaited {
         let Some(job) = self.job.take() else {
             return;
         };
-        // None while the bridge's runtime goes: the window's close then
-        // cancels the statement.
-        let Ok(runtime) = Handle::try_current() else {
+        // `tokio::spawn` panics outside a runtime, and a drop may run there.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
         let client = self.client.clone();
