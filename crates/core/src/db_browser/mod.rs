@@ -9,6 +9,7 @@
 //! catalog, numbers come from `u64`, and every other value is bound.
 
 mod catalog;
+mod keys;
 mod kind;
 pub mod resp;
 mod split;
@@ -17,6 +18,7 @@ mod sql;
 use std::path::{Path, PathBuf};
 
 pub use catalog::*;
+pub use keys::*;
 pub use kind::*;
 pub use split::*;
 pub use sql::*;

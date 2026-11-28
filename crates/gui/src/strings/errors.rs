@@ -530,6 +530,8 @@ pub(super) fn error_message(code: &str) -> Option<&'static str> {
         "db_query_failed" => "The database did not run the statement.",
         "db_row_not_found" => "No row has that key now. Refresh the rows.",
         "db_query_cancelled" => "Cancelled.",
+        "db_key_not_found" => "This key is gone. It may have expired.",
+        "db_pattern_too_long" => "The search is too long.",
         "db_busy" => "Another statement still runs on this database.",
         "db_result_gone" => "The result is no longer kept. Run the statement again.",
         "job_not_cancellable" => "This task cannot be cancelled.",

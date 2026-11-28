@@ -46,10 +46,14 @@ pub const DB_BUSY: &str = "db_busy";
 pub const DB_FILE_NOT_FOUND: &str = "db_file_not_found";
 /// The site's SQLite file leads out of the site's folder, or is not a regular file.
 pub const DB_FILE_OUTSIDE_SITE: &str = "db_file_outside_site";
+/// The Valkey key is gone: it expired or was deleted.
+pub const DB_KEY_NOT_FOUND: &str = "db_key_not_found";
 /// The server has no such database, or it is one of the server's own.
 pub const DB_NOT_FOUND: &str = "db_not_found";
 /// The SQL text holds more than one statement.
 pub const DB_ONE_STATEMENT: &str = "db_one_statement";
+/// A search for keys longer than the limit.
+pub const DB_PATTERN_TOO_LONG: &str = "db_pattern_too_long";
 pub const DB_QUERY_CANCELLED: &str = "db_query_cancelled";
 /// The server refused the statement; its message is the error's `detail`.
 pub const DB_QUERY_FAILED: &str = "db_query_failed";
@@ -360,8 +364,10 @@ pub const ALL: &[&str] = &[
     DB_BUSY,
     DB_FILE_NOT_FOUND,
     DB_FILE_OUTSIDE_SITE,
+    DB_KEY_NOT_FOUND,
     DB_NOT_FOUND,
     DB_ONE_STATEMENT,
+    DB_PATTERN_TOO_LONG,
     DB_QUERY_CANCELLED,
     DB_QUERY_FAILED,
     DB_READ_ONLY,
