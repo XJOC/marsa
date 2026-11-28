@@ -7,6 +7,7 @@ use marsa_core::types::{
 use super::*;
 use crate::fixtures::connected;
 use crate::model::QueryState;
+use marsa_core::types::Health;
 
 fn server(server: DbServer, state: ServiceState, databases: &[&str]) -> DbServerInfo {
     DbServerInfo {
@@ -207,6 +208,32 @@ fn leaving_drops_the_lists_closes_and_keeps_the_choice() {
         model.next_command(),
         Some(Command::Db(DbCommand::Close))
     ));
+}
+
+#[test]
+fn a_new_session_on_the_open_screen_reads_the_sources_again() {
+    let mut model = connected();
+    opened(&mut model, sources());
+    model.update(Update::Reconnecting);
+    model.update(Update::Connected(Health {
+        app_version: "0.0.0".into(),
+        api_version: 1,
+        pid: 8,
+    }));
+    let read = model.next_command();
+    assert!(
+        matches!(read, Some(Command::Db(DbCommand::ReadSources { .. }))),
+        "{read:?}"
+    );
+    // On another screen nothing is read until it opens.
+    let mut elsewhere = connected();
+    elsewhere.update(Update::Reconnecting);
+    elsewhere.update(Update::Connected(Health {
+        app_version: "0.0.0".into(),
+        api_version: 1,
+        pid: 8,
+    }));
+    assert!(elsewhere.next_command().is_none());
 }
 
 #[test]
@@ -525,20 +552,63 @@ fn refresh_reads_the_same_page_with_the_count_and_columns_read_once() {
     assert_eq!(request.offset, 500);
     assert!(request.count);
 
-    let Some(Command::Db(DbCommand::ReadTable { id, table, .. })) =
-        act(&mut model, DbAction::Tab(DbTab::Columns))
-    else {
-        panic!("no read of the columns");
-    };
+    let (id, source, table) = columns_read(&mut model);
     assert_eq!(table, users());
+    answer_columns(&mut model, id, source, table);
+    assert!(open(&model).columns.is_some());
+    act(&mut model, DbAction::Tab(DbTab::Rows));
+    assert!(act(&mut model, DbAction::Tab(DbTab::Columns)).is_none());
+}
+
+/// The read of the open table's columns, as its tab asks.
+fn columns_read(model: &mut Model) -> (u64, DbSource, DbTableRef) {
+    match act(model, DbAction::Tab(DbTab::Columns)) {
+        Some(Command::Db(DbCommand::ReadTable { id, source, table })) => (id, source, table),
+        other => panic!("no read of the columns: {other:?}"),
+    }
+}
+
+fn answer_columns(model: &mut Model, id: u64, source: DbSource, table: DbTableRef) {
     model.update(Update::Db(DbUpdate::Table {
         id,
+        source,
+        table,
         result: Ok(marsa_core::types::DbTable {
             columns: Vec::new(),
         }),
     }));
-    act(&mut model, DbAction::Tab(DbTab::Rows));
-    assert!(act(&mut model, DbAction::Tab(DbTab::Columns)).is_none());
+}
+
+fn posts() -> DbTableRef {
+    DbTableRef {
+        schema: None,
+        name: "posts".into(),
+    }
+}
+
+#[test]
+fn the_columns_of_the_table_left_never_fill_the_next_one() {
+    let mut model = connected();
+    table_opened(&mut model);
+    let (id, source, table) = columns_read(&mut model);
+    act(&mut model, DbAction::ChooseTable(posts()));
+    // The slow answer about `users` comes while `posts` is open.
+    answer_columns(&mut model, id, source, table);
+    assert_eq!(open(&model).table, posts());
+    assert!(open(&model).columns.is_none());
+    assert_eq!(columns_read(&mut model).2, posts());
+}
+
+#[test]
+fn an_answer_about_another_table_or_source_is_not_kept() {
+    let mut model = connected();
+    table_opened(&mut model);
+    let (id, source, _) = columns_read(&mut model);
+    answer_columns(&mut model, id, source, posts());
+    assert!(open(&model).columns.is_none());
+    let (id, _, table) = columns_read(&mut model);
+    answer_columns(&mut model, id, shop(), table);
+    assert!(open(&model).columns.is_none());
 }
 
 #[test]

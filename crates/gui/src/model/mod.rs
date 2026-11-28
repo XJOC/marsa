@@ -190,6 +190,8 @@ impl Model {
                     connection: Connection::Running(health),
                     ..Session::default()
                 };
+                // Databases stayed open: nothing else reads its list again.
+                self.db_sources_changed();
             }
             Update::Reconnecting => self.disconnect(Connection::Reconnecting),
             Update::Failed(code) => self.disconnect(Connection::Failed(code)),
